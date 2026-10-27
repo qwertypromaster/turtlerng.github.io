@@ -6018,7 +6018,7 @@ const V2_PATTERNS = {
   magnet:['field','🧲'], dark:['diag','🌑'], glowing:['dots','✨'], flowery:['petals','🌸'], mythical:['hex','🐉'],
   magical:['tri','🔮'], sapphire_activated:['hex','💎'], calm:['waves','🍃'], strongman:['grid','💪'],
   atomic_radiation:['rings','☢️'], wealthy_jackpot:['diag','💰'], porridge:['dots','🥣'], cactus:['cross','🌵'],
-  kal:['dots','💩'], daniil:['grid','😴'], moon:['stars','🌙'], sun:['rays','☀️'], turtle:['hex','🐢'],
+  kal:['dots','💩'], daniil:['grid','son'], moon:['stars','🌙'], sun:['rays','☀️'], turtle:['hex','🐢'],
   devilish:['tri','😈']
 };
 
@@ -6470,7 +6470,8 @@ function v2PatternTile(kind, color, emoji){
     case 'stars': body = `<path d='M30 22 L32 28 L38 30 L32 32 L30 38 L28 32 L22 30 L28 28 Z' fill='${c}'/><circle cx='85' cy='80' r='1.6' fill='${c}'/><circle cx='60' cy='105' r='1.2' fill='${c}'/>`; break;
     case 'rays': body = `<path d='M60 0V120M0 60H120M17 17L103 103M103 17L17 103' stroke='${c}' stroke-width='0.8'/>`; break;
   }
-  const em = emoji ? `<text x='${w - 30}' y='${h - 18}' font-size='26' text-anchor='middle' opacity='0.9'>${encodeURIComponent(emoji)}</text>` : '';
+  const isWord = emoji && /^[a-z]+$/i.test(emoji);
+  const em = emoji ? (isWord ? `<text x='${w - 34}' y='${h - 20}' font-size='22' font-weight='800' font-family='Arial Rounded MT Bold,Arial,sans-serif' text-anchor='middle' fill='${c}' opacity='0.9'>${encodeURIComponent(emoji)}</text>` : `<text x='${w - 30}' y='${h - 18}' font-size='26' text-anchor='middle' opacity='0.9'>${encodeURIComponent(emoji)}</text>`) : '';
   return { url: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='${w}' height='${h}'%3E${body}${em}%3C/svg%3E")`, w, h };
 }
 
@@ -6503,7 +6504,7 @@ function v2Material(kind, P){
 }
 
 function teardownThemeV2(){
-  ['v2-plain', 'v2-pattern', 'v2-watermark', 'v2-image', 'atmos-canvas', 'mechanical-gear', 'mechanical-gear-2', 'fruity-emoji-layer'].forEach(id=>{
+  ['v2-plain', 'v2-pattern', 'v2-watermark', 'v2-image', 'atmos-canvas', 'mechanical-gear', 'mechanical-gear-2', 'fruity-emoji-layer', 'son-layer'].forEach(id=>{
     const el = document.getElementById(id);
     if(!el) return;
     if(el.tagName === 'CANVAS'){ try{ const x = el.getContext('webgl'); const e = x && x.getExtension('WEBGL_lose_context'); if(e) e.loseContext(); }catch(e){} }
@@ -6556,11 +6557,46 @@ function v2EmojiLayer(p, cls){
   document.body.appendChild(layer);
 }
 
+// Son (сын): instead of sleepy faces, the word «son» drifts up the screen in a dozen
+// handwritten and sticker styles; a click pops a big «SON!» where you pressed
+const SON_STYLES = ['son-a', 'son-b', 'son-c', 'son-d', 'son-e'];
+function sonLayer(){
+  const old = document.getElementById('son-layer'); if(old) old.remove();
+  const layer = document.createElement('div');
+  layer.id = 'son-layer'; layer.className = 'son-layer'; layer.setAttribute('aria-hidden', 'true');
+  for(let i = 0; i < 14; i++){
+    const el = document.createElement('div');
+    el.className = 'son-w ' + SON_STYLES[i % SON_STYLES.length];
+    el.textContent = i % 7 === 3 ? 'SON' : 'son';
+    el.style.left = (3 + Math.random() * 90) + 'vw';
+    el.style.fontSize = (18 + Math.random() * 26) + 'px';
+    el.style.animationDuration = (12 + Math.random() * 10) + 's';
+    el.style.animationDelay = (-Math.random() * 18) + 's';
+    el.style.setProperty('--tilt', (Math.random() * 30 - 15) + 'deg');
+    layer.appendChild(el);
+  }
+  document.body.appendChild(layer);
+  if(window._sonClick) document.removeEventListener('pointerdown', window._sonClick);
+  window._sonClick = (e)=>{
+    if(!document.getElementById('son-layer')){ document.removeEventListener('pointerdown', window._sonClick); window._sonClick = null; return; }
+    if(e.target.closest('button, input, select, textarea, a, [role="dialog"]')) return;
+    const pop = document.createElement('div');
+    pop.className = 'son-pop ' + SON_STYLES[Math.floor(Math.random() * SON_STYLES.length)];
+    pop.textContent = Math.random() < 0.5 ? 'SON!' : 'son.';
+    pop.style.left = e.clientX + 'px'; pop.style.top = e.clientY + 'px';
+    pop.style.setProperty('--tilt', (Math.random() * 30 - 15) + 'deg');
+    document.body.appendChild(pop);
+    setTimeout(()=> pop.remove(), 1100);
+  };
+  document.addEventListener('pointerdown', window._sonClick);
+}
+
 function applyThemeV2(id, p){
   const tier = v2TierFor(id);
   if(!tier) return false;
   const lowCls = rarityClassKeyFor(id);
   if(lowCls === 'common' || lowCls === 'weak' || lowCls === 'decent') setTimeout(()=>{ if(activeThemeId === id || !activeThemeId) v2EmojiLayer(p, lowCls); }, 0);
+  if(id === 'daniil') setTimeout(()=>{ if(activeThemeId === id || window._themeNow === id) sonLayer(); }, 0);
   // the generic emoji layer belongs to the old system
   const oldLayer = document.getElementById('theme-emojis-layer');
   if(oldLayer) oldLayer.remove();
