@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="style.css" />
+  <title>Прокрутка</title>
+</head>
+<body>
+  <!-- Start menu: shown on load, gates entry into the game -->
+  <div id="start-menu" role="dialog" aria-label="Главное меню">
+    <div class="start-menu-bg" aria-hidden="true"></div>
+    <div class="start-menu-inner">
+      <div class="start-menu-eyebrow">Прокрутка</div>
+      <div class="start-menu-title">TURTLE`S RNG</div>
+      <button id="start-menu-btn" class="start-menu-btn">Начать</button>
+      <div class="start-menu-version">v1.3</div>
+    </div>
+  </div>
+
+  <div id="top-stats">
+    <div id="luck-display">Удача: <span id="luck-percent">1</span> <span id="bonus-indicator" class="bonus-tag" aria-hidden="true" hidden>🎯 x2 на следующую прокрутку</span></div>
+    <div id="speed-display">Скорость: <span id="spin-speed">1s</span></div>
+    <div id="spins-total" class="spins-total-badge">Прокруток: <span id="spins-total-num">0</span></div>
+  </div>
+
+  <!-- developer / hidden list button (requires code TURTLES) -->
+  <button id="dev-btn" aria-label="Список значений">☰</button>
+
+  <!-- anvil / crafting button -->
+  <button id="anvil-btn" aria-label="Кузница">⚒</button>
+  <button id="brewery-btn" aria-label="Зельеварня" style="display:none">⚗️</button>
+
+  <div id="dev-panel" aria-hidden="true"></div>
+  <div id="now-playing" aria-live="polite"></div>
+
+  <div id="coin-counter" aria-live="polite" role="status">
+    <span id="coin-amount">0</span> <span class="coin-emoji">🪙</span>
+    <button id="bank-btn" class="bank-btn-chip" style="display:none">Банк</button>
+  </div>
+  <!-- weather and time system (under coin counter) -->
+  <div id="weather-time" aria-live="polite" role="status">
+    <div id="time-panel" class="wt-col">
+      <div id="time-of-day" class="wt-badge">Время: <span id="time-label">День</span></div>
+      <div id="time-timer" class="wt-sub">До смены: <span id="time-remaining">--:--</span></div>
+    </div>
+
+    <div id="weather-panel" class="wt-col">
+      <div id="weather-status" class="wt-badge">Погода: <span id="weather-label">Обычная</span></div>
+      <div id="weather-timer" class="wt-sub">До смены: <span id="weather-remaining">--:--</span></div>
+    </div>
+  </div>
+
+  <!-- poop rain layer moved out of #weather-time so drops sit above the weather panel -->
+  <div id="poop-rain-layer" style="display:none"></div>
+  <button id="inventory-btn" aria-label="Инвентарь">Инвентарь</button>
+  <button id="quests-btn" aria-label="Квесты">📜 Квесты</button>
+  <button id="words-btn" aria-label="Промокод / Слова">🎁 Промокод</button>
+  <button id="ui-toggle-btn" aria-label="Скрыть интерфейс" title="Скрыть/показать все кнопки">👁️</button>
+
+  <main id="app">
+    <div id="spin-countdown" class="spin-countdown">До x2 удачи: <span id="spins-until">10</span></div>
+    <div class="btn-stack">
+      <div class="btn-row">
+        <button id="spin-btn">Прокрутить</button>
+        <div class="key-hint" aria-hidden="true">Space</div>
+      </div>
+
+      <div class="btn-row">
+        <button id="auto-spin-btn" aria-pressed="false" aria-label="Авто-прокрутка" title="Разблокируется автоматически при 200 прокрутках">Авто‑Прокрутка</button>
+        <div class="key-hint" aria-hidden="true">E</div>
+      </div>
+    </div>
+
+    <div id="result" aria-live="polite"></div>
+  </main>
+
+  <div id="inventory" role="dialog" aria-hidden="true">
+    <div class="inventory-panel">
+      <header class="inv-header">
+        <div class="ws-title inv-title"><span class="ws-title-ic" aria-hidden="true">🎒</span><div><strong>Инвентарь</strong><small>Ауры, зелья и снаряжение</small></div></div>
+        <div class="tabs">
+          <button class="tab active" data-tab="rarities">Редкость</button>
+          <button class="tab" data-tab="items">Предметы</button>
+          <button class="tab" data-tab="equipment">Снаряжение</button>
+          <button class="tab" data-tab="special">Особые</button>
+        </div>
+        <button id="close-inv" aria-label="Закрыть">✕</button>
+      </header>
+
+      <section class="inv-body">
+        <div id="tab-rarities" class="tab-panel">
+          <div class="values-toolbar">
+            <button id="values-select-toggle" class="values-select-btn">Выбор</button>
+            <div id="values-select-actions" class="values-select-actions" hidden>
+              <span id="values-select-count" class="values-select-count">Выбрано: 0</span>
+              <button id="values-select-delete" class="values-select-delete-btn" disabled>Удалить</button>
+              <button id="values-select-cancel" class="values-select-cancel-btn">Отмена</button>
+            </div>
+          </div>
+          <div id="inventory-list" class="list"></div>
+        </div>
+
+        <div id="tab-items" class="tab-panel" hidden>
+          <div id="items-list" class="list"></div>
+        </div>
+
+        <div id="tab-equipment" class="tab-panel" hidden>
+          <div id="equipment-list" class="list"></div>
+        </div>
+
+        <div id="tab-special" class="tab-panel" hidden>
+          <div class="special-tab-note">Особенные ауры хранятся здесь без ограничения по месту. Удалить их можно только полным сбросом сохранения.</div>
+          <div id="special-list" class="list"></div>
+        </div>
+      </section>
+
+      <footer>
+        <div class="inv-footer-row">
+          <div class="inv-slots-info">Слотов: <span id="inv-slots-used">0</span> / <span id="inv-slots-max">10</span></div>
+          <button id="expand-inv" class="expand-inv-btn">Расширить инвентарь</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Value card panel: opens to the left of the inventory when a "Значения" card is clicked -->
+  <div id="value-card-panel" aria-hidden="true" role="dialog" aria-label="Карточка значения">
+    <div class="vcp-inner">
+      <button id="vcp-close" class="vcp-close" aria-label="Закрыть">✕</button>
+      <div class="vcp-icon"><img id="vcp-icon-img" src="" alt="" /></div>
+      <div id="vcp-name" class="vcp-name"></div>
+      <button id="vcp-use" class="vcp-action vcp-use-btn">Использовать</button>
+      <button id="vcp-delete" class="vcp-action vcp-delete-btn">Удалить</button>
+      <div class="vcp-meta">
+        <div class="vcp-meta-row">Прокрутка: <span id="vcp-spin">—</span></div>
+        <div class="vcp-meta-row">Получено: <span id="vcp-time">—</span></div>
+        <div class="vcp-meta-row">Удача при выпадении: <span id="vcp-luck">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- potion effect icons -->
+  <div id="effects-layer" aria-hidden="false"></div>
+
+  <!-- decision prompt: keep or skip (appears on-screen) -->
+  <div id="decision-modal" aria-hidden="true" role="dialog">
+    <div class="decision-panel">
+      <div class="decision-name" id="decision-name"></div>
+      <div class="decision-actions">
+        <button id="decision-skip" class="action-btn">Пропустить</button>
+        <button id="decision-keep" class="action-btn accent-btn">Оставить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- settings button bottom-left -->
+  <button id="settings-btn" aria-label="Настройки">⚙️</button>
+
+  <!-- save button bottom-left (next to settings) -->
+  <button id="save-btn" aria-label="Сохранения">💾</button>
+
+  <!-- clear theme button bottom-center -->
+  <button id="clear-theme-btn" aria-label="Сбросить тему">Сбросить тему</button>
+
+  <!-- save slots modal -->
+  <div id="save-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel">
+      <header>
+        <strong>Сохранения</strong>
+        <button id="save-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body">
+        <div id="save-slots" class="save-slots-wrap">
+          <!-- Save slots will be rendered here -->
+        </div>
+        <div class="autosave-note">
+          Автосохранение активно. Текущий слот: <strong id="current-slot-name">Слот 1</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- custom wipe-confirmation modal (native window.confirm() is unreliable inside
+       sandboxed preview iframes, so the destructive delete flow uses this instead) -->
+  <div id="wipe-confirm-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel wipe-confirm-panel">
+      <header>
+        <strong>Удалить весь прогресс?</strong>
+        <button id="wipe-confirm-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body">
+        <p class="wipe-confirm-warning">Это необратимо удалит <strong>всё</strong>: все слоты сохранений, инвентарь, квесты, зельеварню — абсолютно всё. Отменить это будет нельзя.</p>
+        <label class="wipe-confirm-checkbox">
+          <input type="checkbox" id="wipe-confirm-checkbox" />
+          Я понимаю, что это необратимо
+        </label>
+        <div class="wipe-confirm-actions">
+          <button id="wipe-confirm-cancel" class="action-btn">Отмена</button>
+          <button id="wipe-confirm-delete" class="action-btn" disabled>Удалить всё (3)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- settings modal -->
+  <div id="settings-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel">
+      <header>
+        <strong>Настройки</strong>
+        <button id="settings-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body">
+        <label for="keep-threshold">Редкость для оставления ауры (число после "1 к")</label>
+        <input id="keep-threshold" type="number" min="0" value="0" inputmode="numeric" />
+        <div class="settings-actions-row">
+          <button id="settings-save" class="action-btn accent-btn">Сохранить</button>
+          <button id="settings-reset" class="action-btn">Сброс</button>
+          <button id="open-filter" class="action-btn purple-btn">Фильтр</button>
+          <button id="open-weather-filter" class="action-btn sky-btn">Фильтр погоды</button>
+        </div>
+
+        <div id="filter-panel" class="sub-filter-panel">
+          <div class="sub-filter-header">
+            <strong>Фильтр значений</strong>
+            <button id="close-filter" class="action-btn small muted-btn">✕</button>
+          </div>
+          <div id="filter-list" class="sub-filter-list"></div>
+          <div class="sub-filter-footer">
+            <button id="filter-clear" class="action-btn danger-btn">Сбросить фильтр</button>
+          </div>
+        </div>
+
+        <div id="weather-filter-panel" class="sub-filter-panel">
+          <div class="sub-filter-header">
+            <strong>Фильтр погоды</strong>
+            <button id="close-weather-filter" class="action-btn small muted-btn">✕</button>
+          </div>
+          <div id="weather-filter-list" class="sub-filter-list"></div>
+        </div>
+
+        <div class="settings-group" id="av-settings">
+          <div class="settings-group-row">
+            <label for="gfx-mode">Графика фона</label>
+            <select id="gfx-mode">
+              <option value="auto">Авто — 30 кадров, сама подстраивается</option>
+              <option value="high">Высокая — 60 кадров</option>
+              <option value="eco">Экономия — для слабых ПК</option>
+            </select>
+          </div>
+          <div class="settings-group-row">
+            <label for="music-volume">Музыка тем</label>
+            <div class="range-wrap">
+              <input id="music-volume" type="range" min="0" max="100" step="1" value="55" />
+              <span id="music-volume-val" class="range-val">55%</span>
+            </div>
+          </div>
+          <div class="settings-group-row">
+            <label for="sfx-volume">Звуки выпадения и эффекты</label>
+            <div class="range-wrap">
+              <input id="sfx-volume" type="range" min="0" max="100" step="1" value="80" />
+              <span id="sfx-volume-val" class="range-val">80%</span>
+            </div>
+          </div>
+          <div class="settings-group-row">
+            <label for="weather-volume">Звуки погоды</label>
+            <div class="range-wrap">
+              <input id="weather-volume" type="range" min="0" max="100" step="1" value="80" />
+              <span id="weather-volume-val" class="range-val">80%</span>
+            </div>
+          </div>
+          <div class="settings-group-row settings-group-col">
+            <label>Звук выпадения по классам</label>
+            <div id="drop-sound-classes" class="ds-chips" role="group" aria-label="Звук выпадения по классам"></div>
+            <div class="ds-hint">Выключенный класс выпадает без звука; анимация остаётся.</div>
+          </div>
+          <div class="settings-group-row">
+            <label>Сейчас играет</label>
+            <span id="settings-now-playing" class="np-inline">Тишина</span>
+          </div>
+        </div>
+        <div class="settings-hint">
+          Если значение 0 — каждый раз спрашиваем; если, например, 50 — все вещи с редкостью меньше чем 1 к 50 автоматически пропускаются.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- active rarity banner (center-bottom) -->
+  <div id="active-rarity" aria-hidden="true" role="status" aria-live="polite"></div>
+
+  <!-- Bank modal -->
+  <div id="bank-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel">
+      <header>
+        <strong>Банк</strong>
+        <button id="bank-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body">
+        <div class="bank-card">
+          <div class="bank-amount-row"><span id="bank-amount">0</span> 🪙</div>
+          <div class="bank-subtext">Собрано Автособирателем</div>
+          <button id="bank-withdraw" class="action-btn accent-btn bank-cta">Вывести в кошелёк</button>
+          <button id="bank-upgrade-btn" class="action-btn accent-btn bank-cta">Прокачка (Ур.0 → 1) (300 🪙)</button>
+        </div>
+        <div class="bank-max-note">В банке может храниться максимум <span id="bank-max-display">10000</span> монет.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quests GUI -->
+  <div id="quests-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel quests-panel">
+      <header>
+        <strong id="quests-header-title">Квесты</strong>
+        <button id="quests-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body" id="quests-body"></div>
+    </div>
+  </div>
+
+  <!-- version indicator, always visible -->
+  <div id="version-tag" aria-hidden="true">v1.3</div>
+
+  <!-- Crafting modal / Anvil GUI -->
+  <div id="craft-modal" aria-hidden="true" role="dialog">
+    <div class="craft-panel">
+      <header class="craft-header ws-header">
+        <div class="ws-title"><span class="ws-title-ic" aria-hidden="true">⚒</span><div><strong>Кузница</strong><small>Снаряжение и зелья из выпавших аур</small></div></div>
+        <button id="close-craft" aria-label="Закрыть">✕</button>
+      </header>
+
+      <section class="craft-body">
+        <!-- craft list is injected dynamically by openCraftGUI (Skipper moved into dynamic craftables) -->
+
+        <div class="craft-actions">
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="brewery-modal" aria-hidden="true" role="dialog">
+    <div class="craft-panel">
+      <header class="craft-header ws-header">
+        <div class="ws-title"><span class="ws-title-ic" aria-hidden="true">⚗️</span><div><strong>Зельеварня</strong><small>Сильные зелья, которые варятся только здесь</small></div></div>
+        <button id="close-brewery" aria-label="Закрыть">✕</button>
+      </header>
+
+      <section class="craft-body" id="brewery-craft-body">
+        <!-- craft list is injected dynamically by openBreweryGUI -->
+        <div class="craft-actions"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- generic reusable confirm modal (native window.confirm() is unreliable inside
+       sandboxed preview iframes) -->
+  <div id="generic-confirm-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel generic-confirm-panel">
+      <div class="settings-body">
+        <p id="generic-confirm-text" class="generic-confirm-text"></p>
+        <div class="generic-confirm-actions">
+          <button id="generic-confirm-no" class="action-btn">Нет</button>
+          <button id="generic-confirm-yes" class="action-btn accent-btn">Да</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Слова: code-entry modal -->
+  <div id="words-code-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel words-code-panel">
+      <header>
+        <strong>Промокод</strong>
+        <button id="words-code-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body">
+        <p class="words-code-intro">Введи код от друга — это может быть код на разгадывание слова или обычный промокод.</p>
+        <input id="words-code-input" class="words-code-input" type="text" placeholder="Вставь код сюда" autocomplete="off" spellcheck="false" />
+        <div id="words-code-error" class="words-code-error"></div>
+        <button id="words-code-submit" class="action-btn accent-btn">Играть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Слова: the Wordle-style game itself -->
+  <div id="wordle-modal" aria-hidden="true" role="dialog">
+    <div class="settings-panel wordle-panel">
+      <header>
+        <strong>Угадай слово</strong>
+        <button id="wordle-close" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="settings-body">
+        <div id="wordle-grid" class="wordle-grid"></div>
+        <div id="wordle-message" class="wordle-message"></div>
+        <div id="wordle-keyboard" class="wordle-keyboard"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
