@@ -2264,9 +2264,9 @@ function recomputeEquipmentEffects(){
   let luckAdd = 0;
 
   if(window.pigGloveActive){
-    // pig glove: +10% speed (nerfed from +15%), +40% luck
+    // pig glove: +10% speed (nerfed from +15%), +100% luck
     speedMul *= 1.10;
-    luckAdd += 40;
+    luckAdd += 100;
   }
   if(window.richGloveActive){
     // rich glove: no speed bonus (was +15%), +15% luck
