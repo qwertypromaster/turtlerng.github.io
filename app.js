@@ -17820,7 +17820,13 @@ window.addEventListener('beforeunload', saveState);
 
 /* Auto-load the single save slot on page open/reload (single-slot behavior requested).
    Load saved state, update UI and inventory display immediately. */
+// an imported save waits here until the page is fresh, so nothing can overwrite it on the way
+try{
+  const pend = localStorage.getItem('prk_pending_import');
+  if(pend){ JSON.parse(pend); localStorage.setItem(getSaveKey(currentSaveSlot), pend); localStorage.removeItem('prk_pending_import'); window._importDone = true; }
+}catch(e){ try{ localStorage.removeItem('prk_pending_import'); }catch(e2){} }
 loadStateFromSlot(currentSaveSlot);
+if(window._importDone) setTimeout(()=>{ try{ briefResultMessage('Сохранение загружено ✔', 3000); }catch(e){} }, 600);
 // pre-build the craftables/recipes cache immediately so auto-craft can find recipes even
 // if the player never opens the crafting menu this session (fixes auto-craft silently
 // doing nothing right after a page reload).
@@ -20494,6 +20500,7 @@ document.addEventListener('visibilitychange', ()=>{
       if(!confirm('Загрузить сохранение? Текущий слот будет заменён.')) return;
       used.push(obj.id); localStorage.setItem(usedKey, JSON.stringify(used));
       window._wipingProgress = true;
+      localStorage.setItem('prk_pending_import', obj.data);
       localStorage.setItem(getSaveKey(currentSaveSlot), obj.data);
       location.reload();
     }catch(e){ alert('Файл повреждён или это не сохранение игры.'); }
