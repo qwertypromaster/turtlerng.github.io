@@ -46,7 +46,7 @@ const invBtn = document.getElementById('inventory-btn');
 // spin tick: decoded once and replayed from memory (see AMB below)
 window._playSpinSound = function(){
   try{
-    AMB.playFile('/0611.mp3', 1.0);
+    AMB.playFile('0611.mp3', 1.0);
   }catch(e){}
 }
 const invModal = document.getElementById('inventory');
@@ -982,7 +982,7 @@ const ADM = (function(){
       const on = !!window._rainPreview;
       musicList.appendChild(h('div.adm-tr-h', { style:{ '--rc':'#2f6fd0' } }, 'Звуки погоды'));
       const row = h('div.adm-tr' + (on ? '.on' : ''), { style:{ '--rc':'#2f6fd0' } });
-      row.innerHTML = `<button type="button" class="adm-tr-dl" data-dlfile="/30 MINUTES Rain Sounds (no music or thunder), Light Rain for Sleep, Relaxing, Meditate, Study, Yoga 4.mp3" data-dlname="Дождь" title="Скачать файл">⬇ MP3</button><button type="button" class="adm-tr-play" data-rain="1" aria-label="${on ? 'Остановить' : 'Слушать'} дождь">${on ? '■' : '▶'}</button><div class="adm-tr-main"><b>Дождь</b><span>звук погоды, свой файл</span></div><div class="adm-tr-aura">Погода «Дождь»</div><code>громкость: Звуки погоды</code>`;
+      row.innerHTML = `<button type="button" class="adm-tr-dl" data-dlfile="30 MINUTES Rain Sounds (no music or thunder), Light Rain for Sleep, Relaxing, Meditate, Study, Yoga 4.mp3" data-dlname="Дождь" title="Скачать файл">⬇ MP3</button><button type="button" class="adm-tr-play" data-rain="1" aria-label="${on ? 'Остановить' : 'Слушать'} дождь">${on ? '■' : '▶'}</button><div class="adm-tr-main"><b>Дождь</b><span>звук погоды, свой файл</span></div><div class="adm-tr-aura">Погода «Дождь»</div><code>громкость: Звуки погоды</code>`;
       musicList.appendChild(row);
       const won = !!AMB.windPreviewing;
       const wrow = h('div.adm-tr' + (won ? '.on' : ''), { style:{ '--rc':'#2f9f8a' } });
@@ -991,13 +991,13 @@ const ADM = (function(){
     }
     // the player's own sound files: every one of them is listed and follows a settings slider
     const SFX_OWN = [
-      ['/0611.mp3', 'Щелчок прокрутки', 'каждая прокрутка'],
-      ['/0611_1_.mp3', 'Выпадение «Слабый»', 'звук выпадения'],
-      ['/0611_2_ (1).mp3', 'Выпадение «Неплохой»', 'звук выпадения'],
-      ['/Big cinematic impact Sound Effect 4.mp3', 'Удар «Нормальный»', 'анимация выпадения'],
-      ['/mega-drop-impact.wav', 'Удар «Хороший»', 'анимация выпадения'],
-      ['/very-good-impact.mp3', 'Удар «Очень хороший» и выше', 'анимация выпадения'],
-      ['/Roblox Angry Sound Effect 4.mp3', 'Злой рык', 'тема «Злой»']
+      ['0611.mp3', 'Щелчок прокрутки', 'каждая прокрутка'],
+      ['0611_1_.mp3', 'Выпадение «Слабый»', 'звук выпадения'],
+      ['0611_2_ (1).mp3', 'Выпадение «Неплохой»', 'звук выпадения'],
+      ['Big cinematic impact Sound Effect 4.mp3', 'Удар «Нормальный»', 'анимация выпадения'],
+      ['mega-drop-impact.wav', 'Удар «Хороший»', 'анимация выпадения'],
+      ['very-good-impact.mp3', 'Удар «Очень хороший» и выше', 'анимация выпадения'],
+      ['Roblox Angry Sound Effect 4.mp3', 'Злой рык', 'тема «Злой»']
     ].filter(r=> !q || (r[1] + ' ' + r[2] + ' звук').toLowerCase().includes(q));
     if(SFX_OWN.length){
       musicList.appendChild(h('div.adm-tr-h', { style:{ '--rc':'#c98a1a' } }, 'Твои звуки'));
@@ -3169,9 +3169,9 @@ function showResult(item){
   // Special spin sounds for mid-rare drops
   if(dropSoundOn(dropClass)) try{
     if(dropClass === 'weak'){
-      AMB.playFile('/0611_1_.mp3', 1.0);
+      AMB.playFile('0611_1_.mp3', 1.0);
     } else if(dropClass === 'decent'){
-      AMB.playFile('/0611_2_ (1).mp3', 1.0);
+      AMB.playFile('0611_2_ (1).mp3', 1.0);
     }
   }catch(e){}
 
@@ -3323,7 +3323,7 @@ function setWeatherVolume(v){
 function startRainAudio(){
   try{
     if(!rainAudio){
-      rainAudio = new Audio('/30 MINUTES Rain Sounds (no music or thunder), Light Rain for Sleep, Relaxing, Meditate, Study, Yoga 4.mp3');
+      rainAudio = new Audio('30 MINUTES Rain Sounds (no music or thunder), Light Rain for Sleep, Relaxing, Meditate, Study, Yoga 4.mp3');
       rainAudio.loop = true;
       rainAudio.preload = 'auto';
     }
@@ -3936,7 +3936,7 @@ const PATCHES = {
   dragon_fruit:{ name:'Гамелан драконьего фрукта', genre:'гамелан', level:0.92, style:'dragon_fruit', key:'F', scale:'pelog', prog:[0,2,0,3], tex:[{ kind:'birds', gain:0.008 }], rev:0.5 }
 };
 // tracks that are the player's own files (played from the file, looped, on the music bus)
-PATCHES.sans = { name:'sans.', genre:'свой трек', level:0.7, file:'/sans-theme.mp3' };
+PATCHES.sans = { name:'sans.', genre:'свой трек', level:0.7, file:'sans-theme.mp3' };
 
 // fallback music: these play in turn, on repeat, whenever a theme has no track of its own
 PATCHES.base_lofi   = { name:'Тихий полдень', genre:'лоу-фай', level:0.45, style:'base_lofi', key:'D', scale:'dorian', prog:[0,3,4,3], tex:[{ kind:'vinyl', gain:0.008 }], rev:0.35, base:true };
@@ -6640,7 +6640,7 @@ function applyThemeV2(id, p){
     plain.style.setProperty('--v2-acc', rgba(/^#/.test(acc) ? acc : '#888888', 0.26));
     document.body.appendChild(plain);
     // sun / moon keep their photographs as the one signature object
-    const img = { sun: '/ai-generated-round-sun-isolated-on-transparent-background-free-png.png', moon: '/lunar-radiance-clear-background-moon-free-png.png' }[id];
+    const img = { sun: 'ai-generated-round-sun-isolated-on-transparent-background-free-png.png', moon: 'lunar-radiance-clear-background-moon-free-png.png' }[id];
     if(img){
       const im = document.createElement('img');
       im.id = 'v2-image'; im.src = img; im.alt = ''; im.setAttribute('aria-hidden', 'true');
@@ -6665,7 +6665,7 @@ function applyThemeV2(id, p){
     v2Material(P.mat || (full ? 'glass' : 'tint'), P);
     if(P.mirror) document.body.classList.add('theme-mirror-active');
     if(P.gears && !document.getElementById('mechanical-gear')){
-      const src = '/pngtree-rusty-gear-a-testament-to-time-and-engineering-png-image_14851607.png';
+      const src = 'pngtree-rusty-gear-a-testament-to-time-and-engineering-png-image_14851607.png';
       const g1 = document.createElement('img'); g1.id = 'mechanical-gear'; g1.src = src; g1.alt = ''; g1.setAttribute('aria-hidden', 'true');
       const g2 = document.createElement('img'); g2.id = 'mechanical-gear-2'; g2.src = src; g2.alt = ''; g2.setAttribute('aria-hidden', 'true');
       document.body.appendChild(g1); document.body.appendChild(g2);
@@ -10641,9 +10641,9 @@ function setDropSound(cls, on){
 
 const DropFX = (function(){
   const TIERS = {
-    normal:    { total: 3.4, hit: 2.0, gather: 0, sparks: 60, rings: 1, dim: 0.35, lock: false, sound: '/Big cinematic impact Sound Effect 4.mp3', soundAt: 0, rays: false },
-    good:      { total: 5.0, hit: 1.4, gather: 180, sparks: 140, rings: 2, dim: 0.92, lock: true, sound: '/mega-drop-impact.wav', soundAt: 1.0, rays: false, riser: 1.3 },
-    very_good: { total: 7.2, hit: 1.5, gather: 420, sparks: 260, rings: 3, dim: 1.0, lock: true, sound: '/very-good-impact.mp3', soundAt: 0.7, rays: true, riser: 1.4, heart: true }
+    normal:    { total: 3.4, hit: 2.0, gather: 0, sparks: 60, rings: 1, dim: 0.35, lock: false, sound: 'Big cinematic impact Sound Effect 4.mp3', soundAt: 0, rays: false },
+    good:      { total: 5.0, hit: 1.4, gather: 180, sparks: 140, rings: 2, dim: 0.92, lock: true, sound: 'mega-drop-impact.wav', soundAt: 1.0, rays: false, riser: 1.3 },
+    very_good: { total: 7.2, hit: 1.5, gather: 420, sparks: 260, rings: 3, dim: 1.0, lock: true, sound: 'very-good-impact.mp3', soundAt: 0.7, rays: true, riser: 1.4, heart: true }
   };
   const hexRgb = (h)=>{ const m = /^#?([0-9a-f]{6})$/i.exec(h || ''); if(!m) return [255, 215, 0]; const n = parseInt(m[1], 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
   function brighten(rgb){
@@ -12696,7 +12696,7 @@ function applyThemeForItem(id){
       gear.id = 'mechanical-gear';
       gear.setAttribute('aria-hidden','true');
       gear.alt = 'mechanical gear';
-      gear.src = '/pngtree-rusty-gear-a-testament-to-time-and-engineering-png-image_14851607.png';
+      gear.src = 'pngtree-rusty-gear-a-testament-to-time-and-engineering-png-image_14851607.png';
       document.body.appendChild(gear);
       // small requestAnimationFrame to ensure CSS animation starts smoothly
       requestAnimationFrame(()=> { gear.style.opacity = gear.style.opacity; });
@@ -13152,7 +13152,7 @@ function applyThemeForItem(id){
       const img = document.createElement('img');
       img.id = 'porridge-prime-bg';
       img.setAttribute('aria-hidden','true');
-      img.src = '/bcace232a62c1df410893ecbbbb2ecb4.jpg';
+      img.src = 'bcace232a62c1df410893ecbbbb2ecb4.jpg';
       img.alt = 'porridge prime background';
       img.style.position = 'fixed';
       img.style.left = '50%';
@@ -13194,7 +13194,7 @@ function applyThemeForItem(id){
       const bg = document.createElement('img');
       bg.id = 'big-pearl-bg-img';
       bg.setAttribute('aria-hidden', 'true');
-      bg.src = '/big-pearl-bg.jpg';
+      bg.src = 'big-pearl-bg.jpg';
       bg.alt = '';
       bg.style.position = 'fixed';
       bg.style.left = '50%';
@@ -15162,7 +15162,7 @@ function applyThemeForItem(id){
       const bg = document.createElement('img');
       bg.id = 'sans-bg-img';
       bg.setAttribute('aria-hidden', 'true');
-      bg.src = '/sans-snow-bg.png'; // a wintry pixel forest of its own; the only sans on screen is the walker
+      bg.src = 'sans-snow-bg.png'; // a wintry pixel forest of its own; the only sans on screen is the walker
       bg.alt = '';
       bg.style.position = 'fixed';
       bg.style.left = '50%';
@@ -15191,7 +15191,7 @@ function applyThemeForItem(id){
     if(!document.getElementById('sans-walker')){
       const w = document.createElement('div');
       w.id = 'sans-walker';
-      w.innerHTML = '<div class="sw-shadow"></div><div class="sw-body"><img src="/sans-walker.png" alt="" draggable="false"></div><div class="sw-say"></div>';
+      w.innerHTML = '<div class="sw-shadow"></div><div class="sw-body"><img src="sans-walker.png" alt="" draggable="false"></div><div class="sw-say"></div>';
       document.body.appendChild(w);
       const say = w.querySelector('.sw-say');
       const LINES = ['хех.', 'короткий путь.', 'крути дальше, приятель.', 'не торопись.', 'отличный денёк, а?'];
@@ -15598,7 +15598,7 @@ let activeThemeId = null;
 
   function createEvilAudio(){
     if(window._evilAudio) return window._evilAudio;
-    const a = new Audio('/Roblox Angry Sound Effect 4.mp3');
+    const a = new Audio('Roblox Angry Sound Effect 4.mp3');
     a.preload = 'auto';
     a.volume = 1.0;
     // allow short overlap by creating new instance per play if needed
@@ -15615,7 +15615,7 @@ let activeThemeId = null;
       // play a fresh clone to avoid playback being blocked if previous hasn't finished
       // through the effects bus, so the «Звуки выпадения» slider covers it too
       const playOnce = () => {
-        try{ AMB.playFile('/Roblox Angry Sound Effect 4.mp3', 1.0); }catch(e){ /* ignore */ }
+        try{ AMB.playFile('Roblox Angry Sound Effect 4.mp3', 1.0); }catch(e){ /* ignore */ }
       };
       playOnce();
       window._evilSoundInterval = setInterval(playOnce, 5000);
@@ -20462,7 +20462,7 @@ document.addEventListener('visibilitychange', ()=>{
   // warm the effect buffers once the player has touched the page
   const warm = ()=>{
     window.removeEventListener('pointerdown', warm);
-    ['/0611.mp3', '/0611_1_.mp3', '/0611_2_ (1).mp3', '/Big cinematic impact Sound Effect 4.mp3', '/mega-drop-impact.wav', '/very-good-impact.mp3'].forEach(u=>{ try{ AMB.preload(u); }catch(e){} });
+    ['0611.mp3', '0611_1_.mp3', '0611_2_ (1).mp3', 'Big cinematic impact Sound Effect 4.mp3', 'mega-drop-impact.wav', 'very-good-impact.mp3'].forEach(u=>{ try{ AMB.preload(u); }catch(e){} });
   };
   window.addEventListener('pointerdown', warm, { passive:true });
 })();
