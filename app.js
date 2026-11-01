@@ -532,7 +532,87 @@ const ADM = (function(){
   }
 
   // ---------- Игрок ----------
-  let coinNow, spinNow, ovrInfo, luckIn, speedIn, questList;
+  let coinNow, spinNow, ovrInfo, luckIn, speedIn, questList, buffGrid, gearInfo;
+
+  // Everything below reads POTIONS and ITEMS at click/refresh time, so new potions and
+  // gloves show up here without touching the admin panel.
+  const gearFlag = id => id.replace(/_([a-z])/g, (m, c) => c.toUpperCase()) + 'Active';
+  const handGear = ()=> Object.keys(ITEMS).filter(id => ITEMS[id] && (ITEMS[id].hand === 'left' || ITEMS[id].hand === 'right'));
+  // expected luck per second: base+bonus luck, the every-10th-spin multiplier spread over
+  // the cycle, times spin speed
+  function gearScore(){
+    const cyc = getBonusSpinCycle(), mul = getBonusSpinMultiplier();
+    return (BASE_LUCK_PERCENT + equipmentLuckBonus) * ((cyc - 1) + mul) / cyc * equipmentSpeedMultiplier;
+  }
+  let bestCache = null, bestKey = '';
+  function bestGear(){
+    const ids = handGear();
+    if(bestCache && bestKey === ids.join()) return bestCache;
+    const saved = ids.map(id => [id, window[gearFlag(id)]]);
+    const promo = window._promoBonusSpinMultiplier; window._promoBonusSpinMultiplier = undefined;
+    const best = {};
+    ids.forEach(id=>{
+      ids.forEach(o => { window[gearFlag(o)] = o === id; });
+      recomputeEquipmentEffects();
+      const sc = gearScore(), hand = ITEMS[id].hand;
+      if(!best[hand] || sc > best[hand].score) best[hand] = { id, score: sc };
+    });
+    saved.forEach(([id, v]) => { window[gearFlag(id)] = v; });
+    window._promoBonusSpinMultiplier = promo;
+    recomputeEquipmentEffects();
+    bestKey = ids.join(); bestCache = best;
+    return best;
+  }
+  function equipBest(){
+    const best = bestGear();
+    const pick = Object.values(best).map(b => b.id);
+    pick.forEach(id => { if(!inventory[id] || inventory[id].count <= 0) giveDevItem(id, 1); });
+    handGear().forEach(id => { window[gearFlag(id)] = pick.includes(id); });
+    // extra equipment that isn't a glove (Скипальщик, Автособиратель, anything added later)
+    const extra = Object.keys(ITEMS).filter(id => ITEMS[id] && ITEMS[id].rarity === '-' && ITEMS[id].hand !== 'left' && ITEMS[id].hand !== 'right');
+    extra.forEach(id => {
+      if(!inventory[id] || inventory[id].count <= 0) giveDevItem(id, 1);
+      if(id === 'skipper'){ try{ skipperActive = true; }catch(e){} }
+      else window[gearFlag(id)] = true;
+    });
+    if(typeof updateBankButtonVisibility === 'function') updateBankButtonVisibility();
+    if(extra.length) pick.push(...extra);
+    recomputeEquipmentEffects();
+    renderInventory();
+    refreshPlayer();
+    toast('Надето: ' + pick.map(id => ITEMS[id].name).join(', '));
+  }
+  // potion buffs, with the strongest of each family (Фортуна, Ветер) picked automatically
+  const buffIds = ()=> Object.keys(POTIONS).filter(id => !POTIONS[id].reusable);
+  const potFamily = id => (id.match(/^([a-z]+?)Potion\d*$/) || [])[1] || id;
+  function bestBuffs(){
+    const best = {};
+    buffIds().forEach(id=>{
+      const m = POTIONS[id];
+      if(!(m.duration > 0) || id === 'testPotion') return;
+      const fam = potFamily(id), sc = (m.bonus || 0) + (m.speedBonus || 0);
+      if(!best[fam] || sc > best[fam].sc) best[fam] = { id, sc };
+    });
+    return Object.values(best).map(b => b.id);
+  }
+  function giveBuff(id){
+    const r = activatePotion(id);
+    if(r !== false) toast((POTIONS[id].effectName || POTIONS[id].name) + ' активно');
+    refreshPlayer();
+  }
+  function clearBuffs(){
+    Object.keys(activeEffects).forEach(id=>{
+      const info = activeEffects[id];
+      if(info.timeoutId) BGClock.clear(info.timeoutId);
+      if(info.intervalId) clearInterval(info.intervalId);
+      const el = document.getElementById('effect-' + id); if(el) el.remove();
+      delete activeEffects[id];
+    });
+    recomputePotionSpeedMultiplier();
+    updateTopStats();
+    refreshPlayer();
+    toast('Баффы зелий сняты');
+  }
   function buildPlayer(){
     const sec = h('div.adm-sec', { 'data-sec':'player', hidden:true });
     sec.appendChild(h('div.adm-sec-h', null, h('h2', { text:'Игрок' }), h('p', { text:'Изменения применяются сразу и попадут в автосохранение.' })));
@@ -610,7 +690,19 @@ const ADM = (function(){
           window._wipingProgress = true; // keep autosave from writing the old state back
           location.reload();
         }, 'danger')));
-    sec.appendChild(h('div.adm-cards', null, coinCard, spinCard, ovrCard, questCard, saveCard));
+    // buffs and gear
+    buffGrid = h('div.adm-row.adm-quick');
+    gearInfo = h('p.adm-note');
+    const gearCard = card('Баффы и снаряжение', 'Зелья действуют сразу и не тратятся. Список обновляется сам, когда в игре появляются новые зелья и перчатки.',
+      buffGrid,
+      h('div.adm-row', null,
+        btn('Все лучшие баффы', ()=>{ const ids = bestBuffs(); ids.forEach(id => activatePotion(id)); refreshPlayer(); toast('Активировано: ' + ids.length); }, 'primary'),
+        btn('Снять баффы', clearBuffs, 'danger')),
+      h('div.adm-row', null,
+        btn('Надеть лучшее снаряжение', equipBest, 'primary'),
+        btn('Снять перчатки', ()=>{ handGear().forEach(id => { window[gearFlag(id)] = false; }); recomputeEquipmentEffects(); renderInventory(); refreshPlayer(); toast('Перчатки сняты'); }, 'soft')),
+      gearInfo);
+    sec.appendChild(h('div.adm-cards', null, coinCard, spinCard, ovrCard, gearCard, questCard, saveCard));
     return sec;
   }
   function completeQuests(onlyLine){
@@ -638,6 +730,17 @@ const ADM = (function(){
     ovrInfo.textContent = (l === null || l === undefined) && (s === null || s === undefined)
       ? 'Сейчас переопределений нет.'
       : `Сейчас: удача ${l ? fmt(l) + '%' : 'без изменений'}, задержка ${s ? s + ' с' : 'без изменений'}.`;
+    buffGrid.innerHTML = '';
+    buffIds().forEach(id=>{
+      const m = POTIONS[id];
+      const b = btn(m.name, ()=> giveBuff(id), activeEffects[id] ? 'primary' : 'soft');
+      b.title = m.desc || '';
+      buffGrid.appendChild(b);
+    });
+    const best = bestGear();
+    const worn = handGear().filter(id => window[gearFlag(id)]).map(id => ITEMS[id].name);
+    gearInfo.textContent = 'Лучшее сейчас: ' + ['left', 'right'].filter(k => best[k]).map(k => ITEMS[best[k].id].name).join(', ')
+      + '. Надето: ' + (worn.length ? worn.join(', ') : 'ничего') + '.';
     questList.innerHTML = '';
     if(typeof QUEST_LINES === 'undefined') return;
     Object.keys(QUEST_LINES).forEach(lineId=>{
@@ -847,8 +950,91 @@ const ADM = (function(){
       cName.value = ''; cDesc.value = ''; durVal.value = ''; Object.values(f).forEach(i => { i.value = ''; });
       renderBuffs();
     }
+    // quest: tasks + its own rewards + an optional time limit
+    const qTasks = [], qRewards = [];
+    const qName = h('input.adm-in', { type:'text', placeholder:'Особый квест', maxlength:60 });
+    const qDesc = h('input.adm-in', { type:'text', placeholder:'Описание (необязательно)', maxlength:200 });
+    // every task type, grouped; each shows only the fields it needs
+    const qType = h('select.adm-in', { 'aria-label':'Тип задания' });
+    let qGrp = null, qGrpName = '';
+    Object.keys(QUEST_TASK_TYPES).forEach(k=>{
+      const T = QUEST_TASK_TYPES[k];
+      if(T.group !== qGrpName){ qGrpName = T.group; qGrp = h('optgroup', { label:T.group }); qType.appendChild(qGrp); }
+      qGrp.appendChild(h('option', { value:k, text:T.name }));
+    });
+    const auraOpts = (sel, any)=>{
+      if(any) sel.appendChild(h('option', { value:'', text:any }));
+      Object.keys(ITEMS).filter(k => ITEMS[k] && ITEMS[k].rarity && ITEMS[k].rarity !== '-')
+        .sort((a, b)=> (ITEMS[a].name || a).localeCompare(ITEMS[b].name || b, 'ru'))
+        .forEach(k => sel.appendChild(h('option', { value:k, text:ITEMS[k].name || k })));
+      return sel;
+    };
+    const weatherOpts = (sel, any)=>{ if(any) sel.appendChild(h('option', { value:'', text:any })); WEATHERS.forEach(w => sel.appendChild(h('option', { value:w.name, text:w.name }))); return sel; };
+    const timeOpts = (sel, any)=>{ if(any) sel.appendChild(h('option', { value:'', text:any })); sel.appendChild(h('option', { value:'День', text:'День' })); sel.appendChild(h('option', { value:'Ночь', text:'Ночь' })); return sel; };
+    const classOpts = (sel, any)=>{ if(any) sel.appendChild(h('option', { value:'', text:any })); Object.keys(RARITY_CLASS_META).forEach(k => sel.appendChild(h('option', { value:k, text:RARITY_CLASS_META[k].name }))); return sel; };
+    const qClass = classOpts(h('select.adm-in', { 'aria-label':'Класс' }));
+    const qClassAny = classOpts(h('select.adm-in', { 'aria-label':'Класс' }), 'любого класса');
+    const qAura = auraOpts(h('select.adm-in', { 'aria-label':'Аура' }));
+    const qPot = h('select.adm-in', { 'aria-label':'Зелье' });
+    Object.keys(POTIONS).filter(k => !POTIONS[k]._promoCustomOwner)
+      .sort((a, b)=> (POTIONS[a].name || a).localeCompare(POTIONS[b].name || b, 'ru'))
+      .forEach(k => qPot.appendChild(h('option', { value:k, text:POTIONS[k].name || k })));
+    const qWeather = weatherOpts(h('select.adm-in', { 'aria-label':'Погода' }));
+    const qTime = timeOpts(h('select.adm-in', { 'aria-label':'Время суток' }));
+    const qDenom = numIn('1 к …', { min:1, class:'adm-in adm-in-s', 'aria-label':'Редкость от 1 к' });
+    const qTarget = numIn('сколько', { min:1, value:1, class:'adm-in adm-in-s' });
+    const qUnit = h('span.adm-note');
+    // conditions any "event" task can carry
+    const cWeather = weatherOpts(h('select.adm-in', { 'aria-label':'Только в погоде' }), 'в любую погоду');
+    const cTime = timeOpts(h('select.adm-in', { 'aria-label':'Только в это время суток' }), 'в любое время');
+    const cTheme = auraOpts(h('select.adm-in', { 'aria-label':'Только с темой' }), 'с любой темой');
+    const cAuto = h('input', { type:'checkbox' });
+    const condRow = h('div.adm-row', null, h('span.adm-note', { text:'Условие:' }), cWeather, cTime, cTheme, h('label.adm-note', null, cAuto, ' только на авто‑прокрутке'));
+    const syncQType = ()=>{
+      const T = QUEST_TASK_TYPES[qType.value], ps = T.params || [];
+      qClass.hidden = !ps.includes('class'); qClassAny.hidden = !ps.includes('classAny');
+      qAura.hidden = !ps.includes('aura'); qPot.hidden = !ps.includes('potion');
+      qWeather.hidden = !ps.includes('weather'); qTime.hidden = !ps.includes('time'); qDenom.hidden = !ps.includes('denom');
+      qUnit.textContent = T.kind === 'time' ? 'минут' : qType.value === 'luckReach' ? '% удачи' : qType.value === 'bankLevel' ? 'уровень' : 'раз / штук';
+      condRow.hidden = T.kind !== 'event';
+    };
+    qType.addEventListener('change', syncQType); syncQType();
+    const qTaskTags = h('div.adm-tags');
+    function renderQTasks(){
+      qTaskTags.innerHTML = '';
+      if(!qTasks.length){ qTaskTags.appendChild(h('span.adm-note', { text:'Заданий нет — квест не добавится' })); return; }
+      qTasks.forEach((t, i)=> qTaskTags.appendChild(h('span.adm-tag', null, '📜 ' + customTaskLabel(t), h('button', { type:'button', 'aria-label':'Убрать', onclick:()=>{ qTasks.splice(i, 1); renderQTasks(); } }, '✕'))));
+    }
+    renderQTasks();
+    function addQTask(){
+      const T = QUEST_TASK_TYPES[qType.value], ps = T.params || [];
+      const n = Math.max(1, Math.floor(Number(qTarget.value) || 1));
+      const t = { type:qType.value, target: T.kind === 'time' ? n * 60 : n };
+      if(ps.includes('class')) t.rarityClass = qClass.value;
+      if(ps.includes('classAny') && qClassAny.value) t.rarityClass = qClassAny.value;
+      if(ps.includes('aura')) t.auraId = qAura.value;
+      if(ps.includes('potion')) t.potionId = qPot.value;
+      if(ps.includes('weather')) t.weatherName = qWeather.value;
+      if(ps.includes('time')) t.timeOfDay = qTime.value;
+      if(ps.includes('denom')){
+        t.minDenom = Math.max(1, Math.floor(Number(qDenom.value) || 0));
+        if(!(Number(qDenom.value) > 0)){ toast('Укажи редкость: от 1 к скольки', 'err'); return; }
+      }
+      if(T.kind === 'event'){
+        const c = {};
+        if(cWeather.value) c.weather = cWeather.value;
+        if(cTime.value) c.time = cTime.value;
+        if(cTheme.value) c.theme = cTheme.value;
+        if(cAuto.checked) c.auto = true;
+        if(Object.keys(c).length) t.cond = c;
+      }
+      qTasks.push(t); qTarget.value = '1'; renderQTasks();
+    }
+    const qRB = rewardBuilder(qRewards, 'Награды за квест нет');
+    const qLimit = numIn('0 = без ограничения', { min:0 });
+    const qLimitUnit = h('select.adm-in', null, h('option', { value:'1', text:'минут' }), h('option', { value:'60', text:'часов' }), h('option', { value:'1440', text:'дней' }));
     const pOut = outputRow();
-    const promoCard = card('Промокод', 'Любая комбинация наград, смены погоды и баффов. Нужно хотя бы что-то одно.',
+    const promoCard = card('Промокод', 'Любая комбинация наград, смены погоды, баффов и квеста. Нужно хотя бы что-то одно.',
       h('div.adm-sub', { text:'Награды' }), pRB.el,
       h('div.adm-sub', { text:'Погода' }),
       h('div.adm-row', null, pWSel, pWDur, btn('Задать погоду', ()=>{
@@ -857,13 +1043,27 @@ const ADM = (function(){
       }, 'soft')), pWCur,
       h('div.adm-sub', { text:'Баффы' }), modeSeg, exWrap, customWrap,
       h('div.adm-row', null, btn('Добавить бафф', addBuff, 'soft')), pBuffTags,
+      h('div.adm-sub', { text:'Квест (необязательно)' }),
+      h('div.adm-fields', null, h('label.adm-field', null, h('span', { text:'Название квеста' }), qName), h('label.adm-field', null, h('span', { text:'Описание' }), qDesc)),
+      h('div.adm-row', null, qType, qClass, qClassAny, qAura, qPot, qWeather, qTime, qDenom),
+      h('div.adm-row', null, qTarget, qUnit, btn('Добавить задание', addQTask, 'soft')), condRow, qTaskTags,
+      h('div.adm-note', { text:'Награда за выполнение квеста:' }), qRB.el,
+      h('div.adm-row', null, h('span.adm-note', { text:'Ограничение по времени' }), qLimit, qLimitUnit),
       h('div.adm-row', null, btn('Сгенерировать промокод', ()=>{
-        if(!pRewards.length && !pWeather && !pBuffs.length){ toast('Добавь награду, погоду или бафф', 'err'); return; }
+        if((qName.value.trim() || qRewards.length) && !qTasks.length){ toast('Добавь квесту хотя бы одно задание', 'err'); return; }
+        if(!pRewards.length && !pWeather && !pBuffs.length && !qTasks.length){ toast('Добавь награду, погоду, бафф или квест', 'err'); return; }
         const payload = { id:'pc_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8), rewards:pRewards.map(r => ({ rt:r.rt, ri:r.ri, rq:r.rq })) };
         if(pWeather){ payload.weather = { name:pWeather.name }; if(pWeather.durationMin) payload.weather.durationMin = pWeather.durationMin; }
         if(pBuffs.length) payload.buffs = pBuffs.map(b => b.existingId ? { existingId:b.existingId } : { custom:{ ...b.custom } });
-        pOut.out.value = generatePromoCode(payload); pOut.out.select();
-        toast('Промокод готов, можно копировать');
+        if(qTasks.length){
+          const lim = Math.max(0, Number(qLimit.value) || 0) * Number(qLimitUnit.value);
+          payload.quest = { name:qName.value.trim() || 'Особый квест', tasks:qTasks.map(t => ({ ...t })), rewards:qRewards.map(r => ({ rt:r.rt, ri:r.ri, rq:r.rq })) };
+          if(qDesc.value.trim()) payload.quest.desc = qDesc.value.trim();
+          if(lim > 0) payload.quest.limitMin = lim;
+        }
+        // a code with a quest is a quest code: the player enters it in the quest menu
+        pOut.out.value = generatePromoCode(payload, payload.quest ? 'QUEST-' : 'PROMO-'); pOut.out.select();
+        toast(payload.quest ? 'Квестовый код готов — его вводят в меню «Квесты»' : 'Промокод готов, можно копировать');
       }, 'primary')), pOut.el);
     sec.appendChild(h('div.adm-cards.adm-cards-2', null, wordCard, promoCard));
     return sec;
@@ -955,14 +1155,14 @@ const ADM = (function(){
     const q = (musicSearch.value || '').trim().toLowerCase();
     const groups = {};
     Object.keys(PATCHES).forEach(id=>{
-      const T = PATCHES[id], aura = T.weather ? 'погода ' + T.weather : T.base ? 'базовый' : ((ITEMS[id] || {}).name || id);
+      const T = PATCHES[id], aura = T.weather ? 'погода ' + T.weather : T.base ? 'базовый' : T.cine ? 'катсцена' : ((ITEMS[id] || {}).name || id);
       if(q && !(T.name + ' ' + T.genre + ' ' + aura + ' ' + id).toLowerCase().includes(q)) return;
-      const cls = T.base ? '_base' : T.weather ? '_wx' : (rarityClassKeyFor(id) || 'special');
+      const cls = T.base ? '_base' : T.weather ? '_wx' : T.cine ? '_cine' : (rarityClassKeyFor(id) || 'special');
       (groups[cls] || (groups[cls] = [])).push(id);
     });
     musicList.innerHTML = '';
-    const GROUP_META = { _base:{ name:'Базовые (играют, когда у темы нет своего трека)', color:'#7a8a80' }, _wx:{ name:'Погода', color:'#2f6fd0' } };
-    ['_base', '_wx'].concat(MUSIC_CLASS_ORDER).forEach(cls=>{
+    const GROUP_META = { _base:{ name:'Базовые (играют, когда у темы нет своего трека)', color:'#7a8a80' }, _wx:{ name:'Погода', color:'#2f6fd0' }, _cine:{ name:'Катсцены', color:'#c9a227' } };
+    ['_base', '_wx', '_cine'].concat(MUSIC_CLASS_ORDER).forEach(cls=>{
       const ids = groups[cls]; if(!ids) return;
       if(!GROUP_META[cls]) ids.sort((a, b)=> (getNativeDenominatorForItem(ITEMS[a] || {}) || 0) - (getNativeDenominatorForItem(ITEMS[b] || {}) || 0));
       const meta = GROUP_META[cls] || RARITY_CLASS_META[cls];
@@ -1020,14 +1220,18 @@ const ADM = (function(){
     testGrid.addEventListener('click', e=>{
       const b = e.target.closest('[data-act]'); if(!b) return;
       const id = b.dataset.id;
+      const demo = DEMO_THEMES[id];
       if(b.dataset.act === 'theme'){
+        // a demo is the active theme for this session, but is never written to the save
         activeThemeId = id; applyThemeForItem(id);
         close();
       } else if(b.dataset.act === 'fx'){
         const cls = rarityClassKeyFor(id);
         const tier = cls === 'normal' ? 'normal' : (cls === 'good' || cls === 'special') ? 'good' : 'very_good';
         close();
-        setTimeout(()=>{ try{ DropFX.play(id, ITEMS[id].name || id, tier, null, { denom:getNativeDenominatorForItem(ITEMS[id]), cls }); }catch(err){} }, 200);
+        const name = demo ? demo.name : (ITEMS[id].name || id);
+        const denom = demo ? demo.denom : getNativeDenominatorForItem(ITEMS[id]);
+        setTimeout(()=>{ try{ DropFX.play(id, name, tier, null, { denom, cls }); }catch(err){} }, 200);
       }
     });
     sec.appendChild(h('div.adm-toolbar', null, testSearch,
@@ -1046,6 +1250,21 @@ const ADM = (function(){
     const ids = listFor('auras').filter(id=> !q || (ITEMS[id].name || '').toLowerCase().includes(q) || id.includes(q));
     testGrid.innerHTML = '';
     const frag = document.createDocumentFragment();
+    // demo themes first: one per class, they exist only here
+    const demos = Object.keys(DEMO_THEMES).filter(id=> !q || 'демо'.includes(q) || DEMO_THEMES[id].name.toLowerCase().includes(q) || id.includes(q));
+    if(demos.length){
+      frag.appendChild(h('div.adm-tr-h', { style:{ gridColumn:'1 / -1' } }, 'Демо-темы — по одной на класс, только здесь'));
+      demos.forEach(id=>{
+        const d = DEMO_THEMES[id], cls = d.cls, meta = RARITY_CLASS_META[cls] || {};
+        const hasFx = cls !== 'common' && cls !== 'weak' && cls !== 'decent';
+        const row = h('div.adm-test', { style:{ '--rc':meta.color || '#999' } });
+        row.innerHTML = `<div class="adm-test-name">${readableName(styledRarityName(id, d.name, true))}<small>${esc(cls === 'incredible' ? 'Невероятный' : meta.name || '')}${PATCHES[id] ? ', ♪ ' + esc(PATCHES[id].name) : ''}</small></div>`
+          + `<button type="button" class="adm-mini" data-act="theme" data-id="${esc(id)}">Тема</button>`
+          + (hasFx ? `<button type="button" class="adm-mini" data-act="fx" data-id="${esc(id)}">Выпадение</button>` : '');
+        frag.appendChild(row);
+      });
+      frag.appendChild(h('div.adm-tr-h', { style:{ gridColumn:'1 / -1' } }, 'Ауры'));
+    }
     ids.forEach(id=>{
       const cls = rarityClassKeyFor(id);
       const hasFx = cls && cls !== 'common' && cls !== 'weak' && cls !== 'decent';
@@ -1448,7 +1667,7 @@ const ITEMS = {
   rare: { id: 'rare', name: 'Редкий', rarity: '1 к 8', icon: 'rare.png' },
   epic: { id: 'epic', name: 'Эпический', rarity: '1 к 16', icon: 'epic.png' },
   cool: { id: 'cool', name: 'Крутой', rarity: '1 к 32', icon: 'common.png' },
-  cool_summer: { id: 'cool_summer', name: 'Крутой : Летний Сезон <span style="color:#6fb7ef">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>', rarity: '1 к 64,000', icon: 'common.png', craftOnly: true },
+  cool_summer: { id: 'cool_summer', name: 'Крутой : Летний Сезон <span class="rn-tag-ltd" style="color:#6fb7ef">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>', rarity: '1 к 64,000', icon: 'common.png', craftOnly: true },
   air: { id: 'air', name: 'Воздух', rarity: '1 к 50', icon: 'common.png' },
   aquamarine: { id: 'aquamarine', name: 'Аквамарин', rarity: '1 к 64', icon: 'common.png' },
   silver: { id: 'silver', name: 'Серебряный', rarity: '1 к 100', icon: 'common.png' },
@@ -1492,7 +1711,7 @@ const ITEMS = {
   // NEW CRAFT-ONLY SEA TURTLE (limited summer 2026)
   turtle_sea: {
     id: 'turtle_sea',
-    name: 'Туртл : Морская Черепашка <span style="color:#6fb7ef">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>',
+    name: 'Туртл : Морская Черепашка <span class="rn-tag-ltd" style="color:#6fb7ef">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>',
     rarity: 'Крафт',
     icon: 'common.png',
     craftOnly: true
@@ -1523,7 +1742,7 @@ const ITEMS = {
   // to "Хороший" via RARITY_CLASS_EXCEPTIONS since its static 500k number would otherwise
   // read as "Нормальный"
   big_pearl: { id: 'big_pearl', name: 'Big Pearl', rarity: '1 к 500,000', icon: 'common.png', nativeWeather: 'Каловый дождь', weatherExclusive: true },
-  dragon_fruit: { id: 'dragon_fruit', name: 'Фруктовый : Драконий Фрукт <span style="color:#e0a0ff">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>', rarity: '1 к 5,500,000', icon: 'common.png', craftOnly: true },
+  dragon_fruit: { id: 'dragon_fruit', name: 'Фруктовый : Драконий Фрукт <span class="rn-tag-ltd" style="color:#e0a0ff">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>', rarity: '1 к 5,500,000', icon: 'common.png', craftOnly: true },
   // Love & Сакура: only obtainable during the rare Kawaii biome
   love: { id: 'love', name: 'Love', rarity: '1 к 3,000', icon: 'common.png', nativeWeather: 'Kawaii', weatherExclusive: true },
   sakura: { id: 'sakura', name: 'Сакура', rarity: '1 к 25,000', icon: 'common.png', nativeWeather: 'Kawaii', weatherExclusive: true },
@@ -1546,7 +1765,7 @@ const ITEMS = {
   pollen: { id: 'pollen', name: 'Пыльца', rarity: '1 к 78,000,000', icon: 'common.png' },
   hypnosis: { id: 'hypnosis', name: 'Гипноз', rarity: '1 к 85,000,000', icon: 'common.png' },
   // quest-only reward: cannot drop from spinning, no craft recipe — only obtainable via Квест 5
-  summer_cocktail: { id: 'summer_cocktail', name: 'Летний Коктейль <span style="color:#ff8fd6">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>', rarity: 'Неполучаемо', icon: 'common.png', craftOnly: true },
+  summer_cocktail: { id: 'summer_cocktail', name: 'Летний Коктейль <span class="rn-tag-ltd" style="color:#ff8fd6">[ЛИМИТИРОВАНО : ЛЕТО 2026]</span>', rarity: 'Неполучаемо', icon: 'common.png', craftOnly: true },
   // Sun/Moon now use dynamic rarities depending on time of day; native rarity is 1 к 7,000, alternate 1 к 70,000
   sun: { id: 'sun', name: 'Солнце', rarity: '1 к 7,000', icon: 'common.png', nativeTime: 'День', dynamicRarity: { base: 7000, nightOverride: 70000 } },
   moon: { id: 'moon', name: 'Луна', rarity: '1 к 7,000', icon: 'common.png', nativeTime: 'Ночь', dynamicRarity: { base: 7000, dayOverride: 70000 } },
@@ -1668,6 +1887,14 @@ const ITEMS = {
     icon: 'common.png',
     hand: 'left'
   },
+  // Кристаллическая Перчатка (Левая Рука) — tier V, the pair to Радужная
+  crystal_glove: {
+    id: 'crystal_glove',
+    name: 'Кристаллическая Перчатка (Левая Рука)',
+    rarity: '-', // equipment
+    icon: 'common.png',
+    hand: 'left'
+  },
 
   // ---- power-of-two auras (light, tier-matched theming) ----
   dusty: { id: 'dusty', name: 'Пыльный', rarity: '1 к 256', icon: 'common.png' },
@@ -1702,6 +1929,10 @@ const ITEMS = {
 
 /* New value: Механический (mechanical) */
 ITEMS.mechanical = { id: 'mechanical', name: 'Механический', rarity: '1 к 75,000', icon: 'common.png' };
+/* New value: ELECTRICITY : OVERLOAD — the plasma globe */
+ITEMS.electricity_overload = { id: 'electricity_overload', name: 'ELECTRICITY : OVERLOAD', rarity: '1 к 88,888,000', icon: 'common.png' };
+// the first СУПЕРСКИЙ aura: the court of the Capybara King
+ITEMS.glokus_king = { id: 'glokus_king', name: 'Глокус : Король Капибар', rarity: '1 к 100,000,000', icon: 'common.png' };
 
 const ITEM_COLORS = {
   common: { fg: '#0b6623', bg: '#ffffff' },
@@ -1819,7 +2050,14 @@ const ITEM_COLORS = {
   crystal: { fg: '#b8f0ff', bg: '#0a1420' },
   pollen: { fg: '#ffd76a', bg: '#2a2008' },
   hypnosis: { fg: '#c77fff', bg: '#14081f' },
-  summer_cocktail: { fg: '#ff8f3c', bg: '#2a0838' }
+  summer_cocktail: { fg: '#ff8f3c', bg: '#2a0838' },
+  ghost: { fg: '#a7a7a7', bg: '#05070a' },
+  electricity: { fg: '#19b7ff', bg: '#02121c' },
+  fruity: { fg: '#ff4f6a', bg: '#fff4e0' },
+  mechanical: { fg: '#d89a3a', bg: '#0e0c0a' },
+  electricity_overload: { fg: '#5cd2ff', bg: '#020d18' },
+  glokus_king: { fg: '#f2c75c', bg: '#3a0610' },
+  turtle_sea: { fg: '#4fc3f7', bg: '#04263a' }
 };
 
 // ---- Unified rarity name styling ----
@@ -1832,6 +2070,7 @@ function rarityColorFor(id){
   return (c && c.fg) ? c.fg : 'var(--ink)';
 }
 function rarityNameTier(id){
+  if(typeof DEMO_THEMES !== 'undefined' && DEMO_THEMES[id]){ const c = DEMO_THEMES[id].cls; return c === 'common' ? 1 : c === 'weak' ? 2 : c === 'decent' ? 3 : 4; }
   const meta = ITEMS[id];
   if(!meta) return 1;
   if(meta.rarity === '-') return 1; // equipment: name stays plain, this system is only for rarity values
@@ -1873,6 +2112,8 @@ const RARITY_NAME_STYLE = {
   strongman_fighter:  { extraClass:'rn-grad-red-glow', suffix:' 🥊' },
   cool_summer:        { color:'#4fc3f7' },
   mechanical:         { color:'#ff9843' },
+  electricity_overload: { color:'#5cd2ff', extraClass:'rn-font-nsmile rn-glow rn-shake' },
+  glokus_king:        { color:'#f2c75c', extraClass:'rn-font-playfair rn-glokus-king' },
   porridge_prime:     { extraClass:'rn-grad-byw' },
   ghost:              { color:'#a7a7a7', extraClass:'rn-glow rn-pulse' },
   mag_mage:           { color:'#e08fd0', extraClass:'rn-glow rn-pulse' },
@@ -1924,7 +2165,10 @@ const RARITY_NAME_STYLE = {
   crystal:            { extraClass:'rn-font-playfair rn-crystal-facet' },
   pollen:             { extraClass:'rn-font-playfair rn-pollen-drift' },
   hypnosis:           { extraClass:'rn-font-playfair rn-hypno-pulse' },
-  summer_cocktail:    { extraClass:'rn-font-playfair rn-grad-cocktail' }
+  summer_cocktail:    { extraClass:'rn-font-playfair rn-grad-cocktail' },
+  glokus:             { color:'#c8955f', extraClass:'rn-font-cinzel rn-glow' },
+  plains:             { color:'#3f9a2a', extraClass:'rn-glow', suffix:' 🌿' },
+  glokys:             { color:'#b98cff', extraClass:'rn-font-cinzel rn-glow rn-pulse' }
 };
 
 // splits text into one span per character with a staggered bounce delay (used for "wave" values)
@@ -1977,7 +2221,23 @@ const RARITY_CLASS_EXCEPTIONS = { kal: 'weak', mag_mage: 'decent', big_pearl: 'v
   // promoted by request: Love and Сакура both sit in «Нормальный»
   love: 'normal', sakura: 'normal' };
 
+// Demo themes: one per class, NOT auras — they never drop, never enter the inventory and
+// are only reachable from Админка → Проверка. They exist to show what a theme of each
+// class can look like. bg/panel/accent/text/vignette/emojis feed applyThemeForItem's
+// palette the same way a real aura's palette entry does.
+const DEMO_THEMES = {
+  demo_common:     { cls:'common',     denom:500,        name:'Демо · Утренний свет',      fg:'#8a6a3a', bg:'#fbf4e6', accent:'#c8a46a', text:'#3a2a14', panel:'#fffaf0', vignette:0, emojis:[] },
+  demo_weak:       { cls:'weak',       denom:5000,       name:'Демо · Сэйгайха',           fg:'#24427e', bg:'#f2efe6', accent:'#2b4c8c', text:'#14284e', panel:'#fbf9f3', vignette:0.02, emojis:['🎐'] },
+  demo_decent:     { cls:'decent',     denom:50000,      name:'Демо · Лава-лампа',         fg:'#ff6a3a', bg:'#1a0812', accent:'#ff7a3a', text:'#ffe6d6', panel:'#2a0e18', vignette:0.1, emojis:[] },
+  demo_normal:     { cls:'normal',     denom:500000,     name:'Демо · Дождь на стекле',    fg:'#ffb46a', bg:'#0a0c18', accent:'#ffb46a', text:'#f2ecff', panel:'#141826', vignette:0.2, emojis:[] },
+  demo_good:       { cls:'good',       denom:5000000,    name:'Демо · Фонарики над рекой', fg:'#ffb24a', bg:'#060a1c', accent:'#ffb24a', text:'#fff1dc', panel:'#0e1430', vignette:0.2, emojis:[] },
+  demo_very_good:  { cls:'very_good',  denom:50000000,   name:'Демо · Море облаков',       fg:'#ffcf8a', bg:'#2a2a48', accent:'#ffcf8a', text:'#fff6ea', panel:'#3a3458', vignette:0.15, emojis:[] },
+  demo_super:      { cls:'super',      denom:500000000,  name:'Демо · Горизонт событий',   fg:'#ffb070', bg:'#000000', accent:'#ffb070', text:'#ffeedd', panel:'#0a0606', vignette:0.3, emojis:[] },
+  demo_special:    { cls:'special',    denom:0,          name:'Демо · Снежный шар <span style="color:#9fd8ff">[ДЕМО : ЗИМА 2027]</span>', fg:'#9fd8ff', bg:'#140c0a', accent:'#9fd8ff', text:'#fff4ea', panel:'#22140f', vignette:0.25, emojis:[] }
+};
+
 function rarityClassKeyFor(id){
+  if(DEMO_THEMES[id]) return DEMO_THEMES[id].cls;
   if(RARITY_CLASS_SPECIAL_IDS.has(id)) return 'special';
   if(RARITY_CLASS_EXCEPTIONS[id]) return RARITY_CLASS_EXCEPTIONS[id];
   const meta = ITEMS[id];
@@ -2132,35 +2392,39 @@ const GLOVE_BUFFS = {
     { id: 'buff-lucky-glove', name: 'Легкое везение', desc: '+50% к удаче', color: '#3fae2e' }
   ],
   pig_glove: [
-    { id: 'buff-pig-glove', name: 'Везучее Хрюканье', desc: '+10% к скорости прокрутки · +100% к удаче', color: '#e88fc2' }
+    { id: 'buff-pig-glove', name: 'Везучее Хрюканье', desc: '+100% к удаче · +10% к скорости прокрутки', color: '#e88fc2' }
   ],
   rich_glove: [
-    { id: 'buff-rich-glove-1', name: 'Денежная удача', desc: '+50% к удаче', color: '#d6a92a' },
-    { id: 'buff-rich-glove-2', name: 'Богач', desc: 'x2 монет от Автособирателя', color: '#d6a92a' }
+    { id: 'buff-rich-glove-1', name: 'Денежная удача', desc: '+30% к удаче', color: '#d6a92a' },
+    { id: 'buff-rich-glove-2', name: 'Богач', desc: 'x2 монет за клик · монеты чаще · x2 дохода Автособирателя', color: '#d6a92a' }
   ],
   friends_glove: [
-    { id: 'buff-friends-glove', name: 'Дружба', desc: '+17% к скорости прокрутки · +190% к удаче', color: '#7fae2e' }
+    { id: 'buff-friends-glove', name: 'Дружба', desc: '+190% к удаче · +17% к скорости прокрутки', color: '#7fae2e' }
   ],
   zombie_glove: [
-    { id: 'buff-zombie-glove-1', name: 'Мозгииии...', desc: '+20% к скорости прокрутки · +80% к удаче', color: '#35b737' },
-    { id: 'buff-zombie-glove-2', name: 'Заражение', desc: 'Каждые 10 прокруток — следующий бросок x3', color: '#35b737' }
+    { id: 'buff-zombie-glove-1', name: 'Мозгииии...', desc: '+80% к удаче · +20% к скорости прокрутки', color: '#35b737' },
+    { id: 'buff-zombie-glove-2', name: 'Заражение', desc: 'Раз в 10 прокруток — x3 удачи вместо x2', color: '#35b737' }
   ],
   ghost_glove: [
-    { id: 'buff-ghost-glove', name: 'Странное ощущение', desc: '+23% к скорости прокрутки · +333% к удаче', color: '#9fb4c2' }
+    { id: 'buff-ghost-glove', name: 'Странное ощущение', desc: '+333% к удаче · +23% к скорости прокрутки', color: '#9fb4c2' }
   ],
   volcanic_glove: [
     { id: 'buff-volcanic-glove-1', name: 'Пекло', desc: '+66% к удаче · +23% к скорости прокрутки', color: '#ff5a1f' },
-    { id: 'buff-volcanic-glove-2', name: 'Пепел', desc: 'Каждые 10 прокруток — следующий бросок x6', color: '#ff5a1f' }
+    { id: 'buff-volcanic-glove-2', name: 'Пепел', desc: 'Раз в 10 прокруток — x6 удачи вместо x2', color: '#ff5a1f' }
   ],
   lightning_glove: [
-    { id: 'buff-lightning-glove', name: 'Вольт', desc: '+34% к скорости прокрутки, +555% к удаче', color: '#8a4fd6' }
+    { id: 'buff-lightning-glove', name: 'Вольт', desc: '+555% к удаче · +34% к скорости прокрутки', color: '#8a4fd6' }
   ],
   rainbow_glove: [
-    { id: 'buff-rainbow-glove', name: 'Спектральная Сила', desc: '+1111% к удаче, +99% к скорости прокрутки', color: '#ff3b3b' }
+    { id: 'buff-rainbow-glove', name: 'Спектральная Сила', desc: '+1111% к удаче · +99% к скорости прокрутки', color: '#ff3b3b' }
   ],
   clover_glove: [
-    { id: 'buff-clover-glove-1', name: 'Зеленая поляна', desc: '+200% удачи', color: '#1f7a3a' },
-    { id: 'buff-clover-glove-2', name: 'Четырехлистный клевер', desc: 'Каждые 10 прокруток — x10 удача', color: '#1f7a3a' }
+    { id: 'buff-clover-glove-1', name: 'Зелёная поляна', desc: '+200% к удаче', color: '#1f7a3a' },
+    { id: 'buff-clover-glove-2', name: 'Четырёхлистный клевер', desc: 'Раз в 10 прокруток — x10 удачи вместо x2', color: '#1f7a3a' }
+  ],
+  crystal_glove: [
+    { id: 'buff-crystal-glove-1', name: 'Кристальная ясность', desc: '+350% к удаче · +40% к скорости прокрутки', color: '#7fe3ff' },
+    { id: 'buff-crystal-glove-2', name: 'Резонанс', desc: 'Раз в 10 прокруток — x12 удачи вместо x2', color: '#7fe3ff' }
   ]
 };
 function showGloveBuffIcon(buff){
@@ -2188,7 +2452,8 @@ function updateAllGloveBuffIcons(){
     volcanic_glove: !!window.volcanicGloveActive,
     lightning_glove: !!window.lightningGloveActive,
     rainbow_glove: !!window.rainbowGloveActive,
-    clover_glove: !!window.cloverGloveActive
+    clover_glove: !!window.cloverGloveActive,
+    crystal_glove: !!window.crystalGloveActive
   };
   Object.keys(GLOVE_BUFFS).forEach(gloveId=>{
     GLOVE_BUFFS[gloveId].forEach(buff=>{
@@ -2206,35 +2471,39 @@ const GLOVE_BUFF_DEFS = [
     { id:'buff_lucky_glove', name:'Лёгкое везение', desc:'+50% к удаче' }
   ]},
   { flag:'pigGloveActive', color:'#ff9fc0', buffs:[
-    { id:'buff_pig_glove', name:'Везучее Хрюканье', desc:'+10% к скорости прокрутки · +100% к удаче' }
+    { id:'buff_pig_glove', name:'Везучее Хрюканье', desc:'+100% к удаче · +10% к скорости прокрутки' }
   ]},
   { flag:'richGloveActive', color:'#d4af37', buffs:[
-    { id:'buff_rich_glove_1', name:'Денежная удача', desc:'+50% к удаче (без бонуса к скорости)' },
-    { id:'buff_rich_glove_2', name:'Богач', desc:'x2 монет в банк' }
+    { id:'buff_rich_glove_1', name:'Денежная удача', desc:'+30% к удаче' },
+    { id:'buff_rich_glove_2', name:'Богач', desc:'x2 монет за клик · монеты чаще · x2 дохода Автособирателя' }
   ]},
   { flag:'friendsGloveActive', color:'#4fb8e0', buffs:[
-    { id:'buff_friends_glove', name:'Дружба', desc:'+17% к скорости прокрутки · +190% к удаче' }
+    { id:'buff_friends_glove', name:'Дружба', desc:'+190% к удаче · +17% к скорости прокрутки' }
   ]},
   { flag:'zombieGloveActive', color:'#35b737', buffs:[
-    { id:'buff_zombie_glove_1', name:'Мозгииии...', desc:'+20% к скорости прокрутки · +80% к удаче' },
-    { id:'buff_zombie_glove_2', name:'Заражение', desc:'Каждые 10 прокруток — следующий бросок x3' }
+    { id:'buff_zombie_glove_1', name:'Мозгииии...', desc:'+80% к удаче · +20% к скорости прокрутки' },
+    { id:'buff_zombie_glove_2', name:'Заражение', desc:'Раз в 10 прокруток — x3 удачи вместо x2' }
   ]},
   { flag:'ghostGloveActive', color:'#a8c8e0', buffs:[
-    { id:'buff_ghost_glove', name:'Странное ощущение', desc:'+23% к скорости прокрутки · +333% к удаче' }
+    { id:'buff_ghost_glove', name:'Странное ощущение', desc:'+333% к удаче · +23% к скорости прокрутки' }
   ]},
   { flag:'volcanicGloveActive', color:'#ff5a1f', buffs:[
     { id:'buff_volcanic_glove_1', name:'Пекло', desc:'+66% к удаче · +23% к скорости прокрутки' },
-    { id:'buff_volcanic_glove_2', name:'Пепел', desc:'Каждая 10-я прокрутка — следующий бросок x6' }
+    { id:'buff_volcanic_glove_2', name:'Пепел', desc:'Раз в 10 прокруток — x6 удачи вместо x2' }
   ]},
   { flag:'lightningGloveActive', color:'#f0d030', buffs:[
-    { id:'buff_lightning_glove', name:'Вольт', desc:'+34% к скорости прокрутки, +555% к удаче' }
+    { id:'buff_lightning_glove', name:'Вольт', desc:'+555% к удаче · +34% к скорости прокрутки' }
   ]},
   { flag:'rainbowGloveActive', color:'#ff3b3b', buffs:[
-    { id:'buff_rainbow_glove', name:'Спектральная Сила', desc:'+1111% к удаче, +99% к скорости прокрутки' }
+    { id:'buff_rainbow_glove', name:'Спектральная Сила', desc:'+1111% к удаче · +99% к скорости прокрутки' }
   ]},
   { flag:'cloverGloveActive', color:'#2f8a3c', buffs:[
     { id:'buff_clover_glove_1', name:'Зелёная поляна', desc:'+200% к удаче' },
-    { id:'buff_clover_glove_2', name:'Четырёхлистный клевер', desc:'x10 удача каждые 10 прокруток' }
+    { id:'buff_clover_glove_2', name:'Четырёхлистный клевер', desc:'Раз в 10 прокруток — x10 удачи вместо x2' }
+  ]},
+  { flag:'crystalGloveActive', color:'#7fe3ff', buffs:[
+    { id:'buff_crystal_glove_1', name:'Кристальная ясность', desc:'+350% к удаче · +40% к скорости прокрутки' },
+    { id:'buff_crystal_glove_2', name:'Резонанс', desc:'Раз в 10 прокруток — x12 удачи вместо x2' }
   ]}
 ];
 function updateGloveBuffIcons(){
@@ -2269,8 +2538,8 @@ function recomputeEquipmentEffects(){
     luckAdd += 100;
   }
   if(window.richGloveActive){
-    // rich glove: no speed bonus (was +15%), +15% luck
-    luckAdd += 15;
+    // rich glove: no speed bonus, +30% luck
+    luckAdd += 30;
   }
   if(window.friendsGloveActive){
     // Перчатка друзяшек: +17% speed (nerfed from +25%), +190% luck
@@ -2310,6 +2579,11 @@ function recomputeEquipmentEffects(){
   // Клеверная Перчатка (Левая Рука): +200% luck; its 10-spin -> x10 mechanic is handled elsewhere
   if(window.cloverGloveActive){
     luckAdd += 200;
+  }
+  // Кристаллическая Перчатка (Левая Рука): +40% speed, +350% luck; its 10-spin -> x12 mechanic is in getBonusSpinMultiplier
+  if(window.crystalGloveActive){
+    speedMul *= 1.40;
+    luckAdd += 350;
   }
 
   equipmentSpeedMultiplier = speedMul;
@@ -2379,6 +2653,7 @@ function recomputeEquipmentEffects(){
  }
  function getBonusSpinMultiplier(){
    if(typeof window._promoBonusSpinMultiplier === 'number' && window._promoBonusSpinMultiplier > 0) return window._promoBonusSpinMultiplier;
+   if(window.crystalGloveActive) return 12;
    if(window.cloverGloveActive) return 10;
    if(window.volcanicGloveActive) return 6;
    return window.zombieGloveActive ? 3 : 2;
@@ -3134,7 +3409,9 @@ function showResult(item){
       briefResultMessage(`${styledRarityName(item.id, item.name)} пропущен`);
       return;
     } else if(fs === 'keep'){
-      // treat as kept regardless of keepThreshold and slot (no coin payout)
+      // treat as kept regardless of keepThreshold and slot (no coin payout); an aura with a
+      // film of its own still gets its film
+      if(CINE[item.id]) try{ DropFX.play(item.id, item.name || item.id, 'very_good', null, { cls: rarityClassKeyFor(item.id) }); }catch(e){}
       const metaK = ITEMS[item.id] || {};
       const isEquipmentK = metaK && (metaK.rarity === '-' || metaK.hand);
       const isNewSlotK = !inventory[item.id] || inventory[item.id].count === 0;
@@ -3204,6 +3481,7 @@ function showResult(item){
   const doSkip = ()=>{
     // Skipping no longer grants coins; only show a transient message.
     briefResultMessage(`${styledRarityName(item.id, item.name)} пропущен`);
+    questTouched(questEvent('skip', t => !t.rarityClass || t.rarityClass === dropClass));
   };
 
   // helper to perform keep behavior (with slot check) — no coin payouts on keep
@@ -3228,6 +3506,7 @@ function showResult(item){
     inventory[item.id].times += 1;
     recordPulls(item.id, 1);
     renderInventory();
+    questTouched(questEvent('keep', t => !t.rarityClass || t.rarityClass === dropClass));
   };
 
   // if autoDecision set, run it immediately
@@ -3255,7 +3534,7 @@ function showResult(item){
     decisionModal.classList.add('dc-wait');
     const reveal = ()=> decisionModal.classList.remove('dc-wait');
     window.addEventListener('dropfx-end', reveal, { once:true });
-    setTimeout(reveal, 9000);
+    setTimeout(reveal, window._cinePlaying ? 26000 : 9000);
   }
 
   function cleanupDecision(){
@@ -3801,7 +4080,7 @@ function createSimpleWatermark(wmId, text, color){
 const GFX = (function(){
   let mode = 'auto';
   try{ mode = localStorage.getItem('prk_gfx_mode') || 'auto'; }catch(e){}
-  if(!['auto','high','eco'].includes(mode)) mode = 'auto';
+  if(!['auto','high','eco','ultra'].includes(mode)) mode = 'auto';
   const st = { mode, modalOpen: false, blurred: false };
   const MODALS = '#inventory, #craft-modal, #quests-modal, #settings-modal, #save-modal, #bank-modal, #brewery-modal, #dev-panel, #wipe-confirm-modal';
   function refreshModal(){
@@ -3823,12 +4102,13 @@ const GFX = (function(){
   function applyBodyClass(){
     document.body.classList.toggle('gfx-eco', st.mode === 'eco');
     document.body.classList.toggle('gfx-high', st.mode === 'high');
+    document.body.classList.toggle('gfx-ultra', st.mode === 'ultra');
   }
   if(document.body) applyBodyClass(); else document.addEventListener('DOMContentLoaded', applyBodyClass);
   return {
     get mode(){ return st.mode; },
     setMode(m){
-      if(!['auto','high','eco'].includes(m)) return;
+      if(!['auto','high','eco','ultra'].includes(m)) return;
       st.mode = m;
       try{ localStorage.setItem('prk_gfx_mode', m); }catch(e){}
       applyBodyClass();
@@ -3839,9 +4119,14 @@ const GFX = (function(){
       if(st.blurred) return 10;
       if(st.mode === 'eco') return 20;
       if(st.mode === 'high') return 60;
+      // «Без ограничений»: every frame the screen can show, no cap at all
+      if(st.mode === 'ultra') return 1000;
       return kind === 'fx' ? 60 : 30;
     },
     scaleMul(){ return st.mode === 'eco' ? 0.62 : (st.mode === 'high' ? 1.15 : 1); },
+    // «Без ограничений» renders every layer at full resolution and supersamples it (sharper
+    // edges, finer windows and stars), whatever the theme's own budget is
+    ultraScale(){ return Math.min(2, Math.max(1.35, window.devicePixelRatio || 1)); },
     get modalOpen(){ return st.modalOpen; },
     refreshModal,
     // frame governor shared by every render loop: returns true when this rAF
@@ -3849,7 +4134,7 @@ const GFX = (function(){
     // lower the internal resolution of a layer that the machine struggles with.
     gate(fr, ts, kind){
       if(document.hidden) return false;
-      if(st.modalOpen && fr.drawn) return false;
+      if((st.modalOpen || window._cinePlaying) && fr.drawn) return false;
       const interval = 1000 / this.fps(kind);
       if(fr.last && ts - fr.last < interval - 3) return false;
       if(fr.last){
@@ -3857,7 +4142,7 @@ const GFX = (function(){
         fr.samples = (fr.samples || 0) + 1;
         if(late > interval * 1.7 && !st.blurred) fr.slow = (fr.slow || 0) + 1;
         if(fr.samples >= 90){
-          if(st.mode !== 'high' && fr.slow > 30 && fr.onSlow) fr.onSlow();
+          if(st.mode !== 'high' && st.mode !== 'ultra' && fr.slow > 30 && fr.onSlow) fr.onSlow();
           fr.samples = 0; fr.slow = 0;
         }
       }
@@ -3933,16 +4218,18 @@ const PATCHES = {
   pumpkin:     { name:'Тыквенный буги', genre:'шуточный хэллоуин-свинг', level:0.93, style:'pumpkin', key:'D', scale:'harmonic', prog:[0,5,3,4], tex:[{ kind:'wind', gain:0.004 }], rev:0.4 },
   blood_moon:  { name:'Хорал кровавой луны', genre:'готический орган', level:1.04, style:'blood_moon', key:'A', scale:'harmonic', prog:[0,5,3,4], tex:[{ kind:'heart', gain:0.02 }], rev:0.85 },
   mechanical:  { name:'Цех №7', genre:'индастриал', level:1.2, style:'mechanical', key:'E', scale:'phrygian', prog:[0,1,0,6], rev:0.35 },
+  electricity_overload: { name:'Перегрузка', genre:'электро-индастриал', level:0.8, style:'electricity_overload', key:'E', scale:'phrygian', prog:[0,1,5,6], tex:[{ kind:'thunder', gain:0.012 }], rev:0.4 },
+  glokus_king: { name:'Марш Короля Капибар', genre:'королевский марш', level:0.81, style:'glokus_king', key:'C', scale:'ionian', prog:[0,3,4,0], tex:[{ kind:'birds', gain:0.004 }], rev:0.45 },
   dragon_fruit:{ name:'Гамелан драконьего фрукта', genre:'гамелан', level:0.92, style:'dragon_fruit', key:'F', scale:'pelog', prog:[0,2,0,3], tex:[{ kind:'birds', gain:0.008 }], rev:0.5 }
 };
 // tracks that are the player's own files (played from the file, looped, on the music bus)
 PATCHES.sans = { name:'sans.', genre:'свой трек', level:0.7, file:'sans-theme.mp3' };
 
 // fallback music: these play in turn, on repeat, whenever a theme has no track of its own
-PATCHES.base_lofi   = { name:'Тихий полдень', genre:'лоу-фай', level:0.45, style:'base_lofi', key:'D', scale:'dorian', prog:[0,3,4,3], tex:[{ kind:'vinyl', gain:0.008 }], rev:0.35, base:true };
-PATCHES.base_folk   = { name:'Дорога домой', genre:'акустический фолк', level:0.31, style:'base_folk', key:'G', scale:'ionian', prog:[0,4,5,3], rev:0.3, base:true };
-PATCHES.base_clouds = { name:'Медленные облака', genre:'эмбиент', level:0.82, style:'base_clouds', key:'E', scale:'lydian', prog:[0,4,1,5], tex:[{ kind:'birds', gain:0.004 }], rev:0.75, delay:{ time:0.5, fb:0.4 }, base:true };
-PATCHES.base_funk   = { name:'Монетка', genre:'диско-фанк', level:1.18, style:'base_funk', key:'A', scale:'dorian', prog:[0,3,0,4], rev:0.25, base:true };
+PATCHES.base_lofi   = { name:'Тихий полдень', genre:'лоу-фай', level:0.27, style:'base_lofi', key:'D', scale:'dorian', prog:[0,3,4,3], tex:[{ kind:'vinyl', gain:0.008 }], rev:0.35, base:true };
+PATCHES.base_folk   = { name:'Дорога домой', genre:'акустический фолк', level:0.19, style:'base_folk', key:'G', scale:'ionian', prog:[0,4,5,3], rev:0.3, base:true };
+PATCHES.base_clouds = { name:'Медленные облака', genre:'эмбиент', level:0.49, style:'base_clouds', key:'E', scale:'lydian', prog:[0,4,1,5], tex:[{ kind:'birds', gain:0.004 }], rev:0.75, delay:{ time:0.5, fb:0.4 }, base:true };
+PATCHES.base_funk   = { name:'Монетка', genre:'диско-фанк', level:0.71, style:'base_funk', key:'A', scale:'dorian', prog:[0,3,0,4], rev:0.25, base:true };
 // weather music: «Обычная» has none, every other weather has its own
 PATCHES.wx_rain     = { name:'Капли на стекле', genre:'дождливое пианино', level:1.69, style:'wx_rain', key:'C', scale:'aeolian', prog:[0,5,2,6], rev:0.6, weather:'Дождь' };
 PATCHES.wx_windy    = { name:'Попутный ветер', genre:'кельтский джиг', level:0.19, style:'wx_windy', key:'D', scale:'mixolydian', prog:[0,6,3,4], tex:[{ kind:'wind', gain:0.006 }], rev:0.4, weather:'Ветреная' };
@@ -3950,6 +4237,14 @@ PATCHES.wx_snow     = { name:'Первый снег', genre:'зимний вал
 PATCHES.wx_poop     = { name:'Ливень из унитаза', genre:'пердёж-марш', level:0.97, style:'wx_poop', key:'Bb', scale:'ionian', prog:[0,4,0,4,3,0,4,0], rev:0.2, weather:'Каловый дождь' };
 PATCHES.wx_kawaii   = { name:'Сахарное облачко', genre:'каваии-поп', level:0.95, style:'wx_kawaii', key:'E', scale:'majpent', prog:[0,3,1,4], rev:0.35, weather:'Kawaii' };
 PATCHES.wx_matrix   = { name:'Код в дожде', genre:'техно', level:0.99, style:'wx_matrix', key:'E', scale:'phrygian', prog:[0,0,6,5], rev:0.3, delay:{ time:0.36, fb:0.45 }, weather:'Матрица' };
+// demo themes (admin only): one track per class from Нормальный up
+PATCHES.demo_normal     = { name:'Окно в три часа ночи', genre:'ночной джаз под дождём', level:1.0, style:'demo_normal', key:'Eb', scale:'dorian', prog:[0,3,1,4], tex:[{ kind:'rain', gain:0.012 }], rev:0.45, demo:true };
+PATCHES.demo_good       = { name:'Фонарики над рекой', genre:'ночная пентатоника', level:1.0, style:'demo_good', key:'G', scale:'majpent', prog:[0,3,1,4], tex:[{ kind:'waves', gain:0.012 }, { kind:'wind', gain:0.004 }], rev:0.7, delay:{ fb:0.45 }, demo:true };
+PATCHES.demo_very_good  = { name:'Над облаками', genre:'кинематографичный эмбиент', level:1.0, style:'demo_very_good', key:'D', scale:'lydian', prog:[0,4,5,3], tex:[{ kind:'wind', gain:0.014 }], rev:0.75, demo:true };
+PATCHES.demo_super      = { name:'Горизонт событий', genre:'гравитационный дрон', level:1.0, style:'demo_super', key:'C', scale:'phrygian', prog:[0,1,5,6], tex:[{ kind:'space', gain:0.02 }, { kind:'void', gain:0.01 }], rev:0.85, delay:{ time:0.9, fb:0.55 }, demo:true };
+PATCHES.cine_coronation = { name:'Коронация', genre:'катсцена · Глокус : Король Капибар', level:0.64, style:'cine_coronation', key:'D', scale:'ionian', prog:[0], rev:0.62, cine:true };
+PATCHES.cine_horizon    = { name:'Появление', genre:'катсцена · Горизонт событий', level:0.8, style:'cine_horizon', key:'C', scale:'phrygian', prog:[0], rev:0.8, delay:{ time:0.9, fb:0.5 }, cine:true };
+PATCHES.demo_special    = { name:'Заводной снежный шар', genre:'вальс музыкальной шкатулки', level:1.0, style:'demo_special', key:'F', scale:'ionian', prog:[0,5,3,4], tex:[{ kind:'wind', gain:0.004 }], rev:0.6, demo:true };
 const BASE_TRACKS = ['base_lofi', 'base_folk', 'base_clouds', 'base_funk'];
 const WEATHER_TRACK = { 'Дождь':'wx_rain', 'Ветреная':'wx_windy', 'Снежная':'wx_snow', 'Каловый дождь':'wx_poop', 'Kawaii':'wx_kawaii', 'Матрица':'wx_matrix' };
 // what should be playing: the theme's own track, else this weather's, else a base track
@@ -5444,6 +5739,38 @@ const AMB = (function(){
     for(let i = 0; i < 16; i++) if(i % 3 !== 2) H.v(V.synBassP, i * 0.25, H.rm(-2) + [0, 0, 12, 1][i % 4], 0.2, 0.07);
     if(H.lvl >= 2) for(let i = 0; i < 8; i++) H.v(V.chipArp, i * 0.5, arp(H, [0, 2, 1, 3], i, 1), 0.2, 0.03, { pan:0.4 });
   }};
+  // ELECTRICITY : OVERLOAD — a transformer room at 128 bpm: four-on-the-floor, a buzzing
+  // 16th bass, an acid line that opens up and an arcing supersaw on every new chord
+  ST.electricity_overload = { meter:4, bpm:128, fn(H){
+    [0, 1, 2, 3].forEach(b=> H.d('kick', b, 0.42, { f:46, dec:0.22 }));
+    for(let b = 0.5; b < 4; b += 1) H.d('hat', b, 0.06, { f:9500, dec:0.05 });
+    for(let b = 0.25; b < 4; b += 0.5) H.d('hat', b, 0.025, { f:12000, dec:0.02, pan:0.35 });
+    if(H.lvl >= 1){ H.d('clap', 1, 0.1); H.d('clap', 3, 0.1); }
+    for(let i = 0; i < 16; i++) if(i % 4 !== 2) H.v(V.synBassP, i * 0.25, H.rm(-2) + (i % 8 === 7 ? 1 : 0), 0.18, i % 4 ? 0.055 : 0.075);
+    if(H.lvl >= 1){
+      const pat = [12, 0, 0, 13, 0, 12, 7, 0, 10, 0, 12, 0, 1, 0, 7, 12];
+      const open = 0.5 + 0.5 * Math.sin(H.bar * 0.4);
+      pat.forEach((n, i)=>{ if(n || i % 2 === 0) H.v(Object.assign({}, V.acid, { lp:400 + 1800 * open }), i * 0.25, H.rm(-1) + n, 0.18, 0.035, { pan:Math.sin(i * 1.3) * 0.25 }); });
+    }
+    if(H.newChord) H.each(H.chordM(0), (m, i)=> H.v(V.supersaw, 0, m, 3.6, 0.012, { pan:-0.4 + i * 0.4, pump:true }));
+    if(H.lvl >= 2 && H.bar % 4 === 3) [3, 3.25, 3.5, 3.75].forEach((b, i)=> H.d('snare', b, 0.03 + i * 0.015, { dec:0.06 }));
+  }};
+  // Глокус : Король Капибар — a royal march under the balcony: the brass carries the tune,
+  // timpani on one and three, a snare cadence, cellos marching, bells every fourth bar
+  ST.glokus_king = { meter:4, bpm:104, fn(H){
+    const ch = H.chordM(0), r = H.rm(-2);
+    if(H.newChord) H.each(ch, (m, i)=> H.v(V.strings, 0, m, 3.9, 0.024, { pan:-0.35 + i * 0.3 }));
+    [0, 1, 2, 3].forEach(b=> H.v(V.celloSt, b, r + (b % 2 ? 7 : 0), 0.42, b % 2 ? 0.06 : 0.08));
+    H.d('timp', 0, 0.3, H.rm(-3) + 12); H.d('timp', 2, 0.2, H.rm(-3) + 19);
+    if(H.lvl >= 1) [0.5, 1, 1.75, 2, 2.5, 3, 3.25, 3.5, 3.75].forEach((b, i)=> H.d('snare', b, i > 5 ? 0.045 : 0.065, { f:2100, dec:0.12 }));
+    H.mel((n)=> H.v(V.brass, n.at, n.m, n.len * 0.9, 0.055, { pan:0.08 }), 1);
+    if(H.lvl >= 2){
+      [1.5, 3.5].forEach(b=> H.each(ch.slice(0, 2), (m)=> H.v(V.horn, b, m, 0.38, 0.028, { pan:-0.25 })));
+      H.mel((n)=> H.v(V.glock, n.at, n.m, n.len, 0.018, { pan:0.35 }), 1);
+    }
+    if(H.bar % 4 === 0) H.bellNote(0, H.rm(0), { ratio:2.0, index:1.3, decay:4 }, 0.035);
+    if(H.lvl >= 3 && H.bar % 8 === 0) H.d('hat', 0, 0.07, { f:5200, dec:1.1 });
+  }};
   // Драконий фрукт — gamelan: interlocking metallophones, a slow core melody, the gong
   ST.dragon_fruit = { meter:4, bpm:120, fn(H){
     const core = H.memo('balungan', ()=>{ const a = []; for(let i = 0; i < 8; i++) a.push(Math.floor(H.rnd() * 5)); return a; });
@@ -5455,6 +5782,163 @@ const AMB = (function(){
     }
     for(let b = 0; b < 4; b++) H.d('tick', b + 0.5, 0.05, 1200, 0.1);
     if(H.bar % 2 === 1) H.d('gong', 3.9, 0.06, H.rm(-3) + 12);
+  }};
+
+  // ---------------- Катсцены: scored to the film, one beat is one second ----------------
+  // Коронация — an organ pedal as the doors open, a processional for the walk, the strings
+  // climbing with you onto the dais, a held breath, the whole orchestra and the bells as the
+  // crown touches your head, and one more tutti when the name becomes a title
+  ST.cine_coronation = { meter:4, bpm:60, fn(H){
+    const bar = H.bar % 6;
+    if(bar > 4) return;
+    const tri = (d, oct)=> [H.deg(d, oct), H.deg(d + 2, oct), H.deg(d + 4, oct)];
+    const roll = (b0, b1, v0, v1, m)=>{ for(let b = b0; b < b1; b += 0.125){ const k = (b - b0) / (b1 - b0); H.d('timp', b, v0 + (v1 - v0) * k * k, m); } };
+    const tutti = (b, d, len, g)=>{
+      H.each(tri(d, 0), (m, i)=> H.v(V.brass, b, m, len, 0.05 * g, { pan:-0.3 + i * 0.3 }));
+      H.each(tri(d, 1), (m, i)=> H.v(V.strings, b, m, len + 0.6, 0.03 * g, { pan:0.35 - i * 0.35 }));
+      H.v(V.horn, b, H.deg(d + 4, -1), len, 0.05 * g);
+      H.v(V.tuba, b, H.deg(d, -1), len, 0.09 * g);
+      H.v(V.pipe, b, H.deg(d, -2), len + 0.6, 0.045 * g);
+      H.d('timp', b, 0.34 * g, H.deg(d, -3) + 12);
+      H.d('gong', b, 0.05 * g, H.deg(d, -3));
+      H.d('hat', b, 0.06 * g, { f:5200, dec:1.4 });
+      H.bellNote(b, H.deg(d, 1), { ratio:2.0, index:1.3, decay:5 }, 0.035 * g);
+    };
+    if(bar === 0){
+      // the doors: an organ pedal and low strings in the dark, the first steps
+      H.v(V.pipe, 0, H.deg(0, -2), 4.2, 0.06);
+      H.each(tri(0, -1), (m, i)=> H.v(V.strings, 0.3, m, 3.9, 0.02, { pan:-0.3 + i * 0.3 }));
+      [2.2, 3.2].forEach(b=> H.v(V.celloSt, b, H.deg(0, -2), 0.45, 0.05));
+      H.d('timp', 2.2, 0.16, H.deg(0, -3) + 12);
+    } else if(bar === 1){
+      // the walk: a processional, cellos on the beat, the horns carry the tune
+      [0, 1, 2, 3].forEach(b=> H.v(V.celloSt, b, H.deg(b % 2 ? 4 : 0, -2), 0.45, 0.07));
+      H.each(tri(3, 0), (m, i)=> H.v(V.strings, 0, m, 2.1, 0.022, { pan:-0.3 + i * 0.3 }));
+      H.each(tri(4, 0), (m, i)=> H.v(V.strings, 2, m, 2.1, 0.022, { pan:-0.3 + i * 0.3 }));
+      [[0, 4, 1], [1, 5, 0.5], [1.5, 4, 0.5], [2, 7, 1.5], [3.5, 6, 0.5]].forEach(([b, d, l])=> H.v(V.horn, b, H.deg(d, 0), l, 0.055, { pan:0.1 }));
+      [0, 2].forEach(b=> H.d('timp', b, 0.22, H.deg(0, -3) + 12));
+      [0.75, 1, 2.75, 3, 3.5].forEach(b=> H.d('snare', b, 0.04, { f:2100, dec:0.12 }));
+    } else if(bar === 2){
+      // up the dais and onto the throne: the strings climb, the brass rises with you
+      for(let i = 0; i < 8; i++) H.each(tri(4, 0), (m)=> H.v(V.tremstr, i * 0.5, m + 12, 0.45, 0.009 + i * 0.0015));
+      [[0, 4], [1, 5], [2, 6]].forEach(([b, d])=> H.v(V.brass, b, H.deg(d, 0), 0.9, 0.045, { pan:0.1 }));
+      [0, 1, 2].forEach(b=> H.v(V.celloSt, b, H.deg(4, -2), 0.45, 0.07));
+      H.v(V.pipe, 0, H.deg(4, -2), 3.2, 0.05);
+      roll(1.5, 3, 0.04, 0.16, H.deg(4, -3) + 12);
+      // you sit: the hall holds its breath
+      H.each([H.deg(4, 1), H.deg(6, 1), H.deg(8, 1)], (m, i)=> H.v(V.strings, 3, m, 1.6, 0.016, { pan:-0.3 + i * 0.3 }));
+    } else if(bar === 3){
+      // the crown rises… and comes down onto your head
+      H.each([H.deg(4, 1), H.deg(6, 1), H.deg(8, 1), H.deg(10, 1)], (m, i)=> H.v(V.tremstr, 0, m, 1.6, 0.011 + i * 0.002, { pan:-0.35 + i * 0.23 }));
+      roll(0.4, 1.6, 0.03, 0.22, H.deg(4, -3) + 12);
+      tutti(1.6, 0, 2.4, 1.15);
+      // the fanfare over the cheering
+      [[2.6, 4], [2.85, 4], [3.0, 7], [3.35, 6], [3.5, 7]].forEach(([b, d])=> H.v(V.brass, b, H.deg(d, 1), 0.3, 0.042, { pan:0.15 }));
+      for(let i = 0; i < 6; i++) H.v(V.glock, 2.2 + i * 0.25, H.deg([0, 2, 4, 7, 4, 7][i], 1), 0.6, 0.025, { pan:0.3 });
+    } else if(bar === 4){
+      // the name becomes a title: a run up the strings and the last, biggest tutti
+      for(let i = 0; i < 8; i++) H.v(V.strings, i * 0.105, H.deg(i, 1), 0.3, 0.02 + i * 0.002);
+      tutti(0.9, 0, 3.0, 1.35);
+      [[1.9, 7], [2.15, 9], [2.4, 11], [2.65, 14]].forEach(([b, d])=> H.v(V.brass, b, H.deg(d, 0), 0.9, 0.035, { pan:-0.1 }));
+      for(let i = 0; i < 8; i++) H.v(V.glock, 1.4 + i * 0.18, H.deg([0, 2, 4, 7, 9, 11, 14, 16][i], 1), 0.8, 0.022, { pan:0.3 });
+    }
+  }};
+  // Появление — the dark before anything: a sub that never ends, a single high glass tone,
+  // then the disk igniting on a low cluster, the jets on a driving ostinato, a breath of
+  // silence before the flare, and a wide, cold chord for the name
+  ST.cine_horizon = { meter:4, bpm:60, fn(H){
+    const bar = H.bar % 6;
+    if(bar > 4) return;
+    if(bar === 0){
+      // empty space, one thin glass tone; at 2.2 s the hole hits with the whole low end
+      H.v(V.glassH, 0.2, H.deg(4, 2), 1.8, 0.012, { pan:0.4, dly:0.6 });
+      H.v(Object.assign({}, V.sub, { a:0.05, r:3 }), 2.2, H.deg(0, -2), 6, 0.09);
+      H.each([H.deg(0, -1), H.deg(1, -1), H.deg(4, -1)], (m, i)=> H.v(V.brass, 2.2, m, 1.6, 0.05, { pan:-0.3 + i * 0.3 }));
+      H.v(V.tuba, 2.2, H.deg(0, -1), 1.6, 0.11);
+      H.d('timp', 2.2, 0.34, H.deg(0, -3) + 12);
+      H.d('gong', 2.2, 0.06, H.deg(0, -3));
+    } else if(bar === 1){
+      // the light starts to bend; at 6.9 s the disk ignites
+      H.each([H.deg(0, -1), H.deg(5, -1)], (m, i)=> H.v(V.strings, 0, m, 4, 0.02, { pan:i ? 0.3 : -0.3 }));
+      H.glide({ lp:900, a:1, r:1.5 }, 0.5, H.deg(4, 1), H.deg(0, 0), 2.4, 0.022);
+      H.each([H.deg(0, -1), H.deg(1, -1), H.deg(4, -1)], (m, i)=> H.v(V.brass, 2.9, m, 1.1, 0.05, { pan:-0.3 + i * 0.3 }));
+      H.v(V.tuba, 2.9, H.deg(0, -1), 1.1, 0.1);
+      H.d('timp', 2.9, 0.3, H.deg(0, -3) + 12);
+    } else if(bar === 2){
+      // the disk turns: an ostinato in the cellos, the brass pedal, jets at 10.2 s
+      for(let i = 0; i < 8; i++) H.v(V.celloSt, i * 0.5, H.deg([0, 0, 1, 0, 0, 0, 5, 4][i], -2), 0.4, 0.075);
+      H.v(V.horn, 0, H.deg(0, -1), 4, 0.04);
+      H.v(V.horn, 2.2, H.deg(4, -1), 1.8, 0.04);
+      H.each([H.deg(0, 0), H.deg(2, 0), H.deg(4, 0)], (m, i)=> H.v(V.tremstr, 2.2, m, 1.8, 0.014, { pan:-0.3 + i * 0.3 }));
+      [0, 2.2].forEach(b=> H.d('timp', b, 0.24, H.deg(0, -3) + 12));
+      H.v(V.glassH, 0.5, H.deg(7, 1), 3, 0.014, { pan:0.3, dly:0.6 });
+    } else if(bar === 3){
+      // the build to the flare, then a breath of nothing at 15.1 s
+      for(let i = 0; i < 12; i++) H.v(V.celloSt, i * 0.25, H.deg([0, 1][i % 2], -2), 0.22, 0.05 + i * 0.004);
+      H.each([H.deg(0, 0), H.deg(1, 0), H.deg(4, 0), H.deg(5, 0)], (m, i)=> H.v(V.tremstr, 0, m, 3, 0.01 + i * 0.002, { pan:-0.35 + i * 0.23 }));
+      for(let b = 1.5; b < 3; b += 0.125) H.d('timp', b, 0.04 + (b - 1.5) * 0.12, H.deg(0, -3) + 12);
+      H.v(V.tuba, 3.1, H.deg(0, -1), 0.9, 0.12);
+      H.v(V.pipe, 3.1, H.deg(0, -2), 0.9, 0.06);
+    } else if(bar === 4){
+      // the name: a wide cold chord, bells in the dark
+      H.each([H.deg(0, 0), H.deg(4, 0), H.deg(7, 0), H.deg(9, 0), H.deg(11, 0)], (m, i)=> H.v(V.strings, 0.9, m, 3.1, 0.02, { pan:-0.4 + i * 0.2 }));
+      H.v(Object.assign({}, V.sub, { a:0.4, r:2.5 }), 0.9, H.deg(0, -2), 3, 0.08);
+      H.v(V.horn, 0.9, H.deg(0, -1), 3, 0.045);
+      H.d('gong', 0.9, 0.06, H.deg(0, -3));
+      H.bellNote(0.9, H.deg(0, 1), { ratio:1.41, index:2, decay:6 }, 0.04);
+      for(let i = 0; i < 5; i++) H.v(V.glassH, 1.6 + i * 0.4, H.deg([7, 9, 11, 14, 16][i], 1), 1.4, 0.012, { pan:Math.sin(i * 1.7) * 0.6, dly:0.6 });
+    }
+  }};
+
+  // ---------------- Демо-темы (только админка) ----------------
+  // Дождь на стекле — late-night jazz trio behind a wet window: brushes, walking bass, Rhodes, vibes
+  ST.demo_normal = { meter:4, bpm:74, swing:0.16, fn(H){
+    for(let b = 0; b < 4; b++) H.d('brush', b, b % 2 ? 0.05 : 0.035, b % 2 ? 0.25 : -0.25);
+    for(let b = 0.5; b < 4; b += 1) H.d('hat', b, 0.018, { f:9000, dec:0.03, pan:0.3 });
+    const walk = [H.rm(-2), H.cm(1, -2), H.cm(2, -2), H.snap(H.cm(0, -1) - 1)];
+    walk.forEach((m, i)=> H.v(V.upright, i, m, 0.9, 0.09));
+    const ch = H.ext(-1);
+    H.each(ch.slice(1), (m, i)=> H.ep(0, m, 1.6, 0.04 - i * 0.004, { pan:-0.2 + i * 0.1 }));
+    if(H.ch(0.6)) H.each(ch.slice(2), (m)=> H.ep(2.5, m, 0.9, 0.028, { pan:0.15 }));
+    if(H.lvl >= 1) H.mel((n)=> H.v(V.vibes, n.at, n.m, n.len, 0.05, { pan:0.25, dly:0.35 }), 1);
+    if(H.lvl >= 3 && H.ch(0.5)) H.pno(3, H.cm(H.pick([2, 3, 4]), 1), 1, 0.03, { pan:-0.3 });
+  }};
+  // Фонарики над рекой — a slow pentatonic night: harp ripples, shakuhachi, a far temple bell
+  ST.demo_good = { meter:3, bpm:66, cbar:2, fn(H){
+    const pat = [0, 1, 2, 3, 2, 1];
+    for(let i = 0; i < 6; i++) H.ks('harp', i * 0.5, arp(H, pat, i + (H.bar % 2) * 2, -1), 0.045 - i * 0.003, { pan:-0.4 + i * 0.12 });
+    if(H.newChord) H.pad({ timbre:'soft', attack:3, release:5, cut:1800 }, 0.04, 2);
+    if(H.newChord) H.v(V.sub, 0, H.rm(-2), 5.8, 0.045);
+    if(H.lvl >= 1) H.mel((n)=> H.v(V.shaku, n.at, n.m, n.len + 0.4, 0.05, { pan:0.2, dly:0.3 }), 0);
+    if(H.lvl >= 2 && H.ch(0.4)) H.v(V.kalimba, H.r(0, 2.5), H.cm(H.pick([0, 1, 2, 3]), 1), 1, 0.03, { pan:H.r(-0.6, 0.6), dly:0.5 });
+    if(H.bar % 8 === 0) H.bellNote(0, H.rm(-1), { ratio:1.41, index:1.6, decay:7 }, 0.03);
+  }};
+  // Море облаков — a cinematic flight above the clouds that opens up section by section
+  ST.demo_very_good = { meter:4, bpm:64, cbar:2, fn(H){
+    if(H.newChord) H.pad({ timbre:'choir', attack:4, release:6 }, 0.045, 2);
+    if(H.newChord) H.pad({ timbre:'glass', attack:3, release:5, oct:1 }, 0.025, 2);
+    if(H.newChord) H.v(V.sub, 0, H.rm(-2), 7.6, 0.05);
+    if(H.lvl >= 1){ const pat = [0, 2, 4, 2]; for(let i = 0; i < 8; i++) H.pno(i * 0.5, arp(H, pat, i, 0), 1.2, 0.032 - (i % 2) * 0.008, { pan:-0.25 + (i % 4) * 0.15 }); }
+    if(H.lvl >= 2) for(let i = 0; i < 8; i++) H.v(V.tremstr, i * 0.5, H.cm(i % 2 ? 2 : 1, 0), 0.45, 0.018, { pan:i % 2 ? 0.35 : -0.35 });
+    if(H.lvl >= 2) H.mel((n)=> H.v(V.horn, n.at, n.m, n.len + 0.5, 0.045, { pan:0.1 }), 0);
+    if(H.lvl >= 3){ H.d('tom', 0, 0.22, 70); H.d('tom', 2.5, 0.12, 80); }
+  }};
+  // Горизонт событий — the sound bends: falling glides, a sub that never ends, pings that echo back late
+  ST.demo_super = { meter:4, bpm:56, cbar:2, fn(H){
+    if(H.newChord){ H.v(Object.assign({}, V.sub, { a:3, r:4 }), 0, H.rm(-2), 7.8, 0.07); H.pad({ timbre:'dark', attack:4, release:6, cut:700 }, 0.05, 2); }
+    H.glide({ lp:900, a:1.5, r:2 }, H.r(0, 1), H.cm(H.pick([1, 2]), 0), H.cm(0, -1), 3, 0.025);
+    for(let i = 0; i < 3; i++) if(H.ch(0.6)) H.v(V.metallo, H.r(0, 3.7), H.cm(H.pick([0, 1, 2, 3]), 1), 1, 0.025, { pan:H.r(-0.8, 0.8), dly:0.7 });
+    if(H.lvl >= 2){ H.d('kick', 0, 0.4, { f:38, dec:0.6, lp:180 }); H.d('kick', 2.75, 0.25, { f:38, dec:0.5, lp:180 }); }
+    if(H.lvl >= 1) H.mel((n)=> H.v(V.glassH, n.at, n.m, n.len + 1, 0.035, { pan:-0.2, dly:0.6 }), 1);
+    if(H.bar % 4 === 3) H.swell(2, 2, 'pink', 300, 0.05);
+  }};
+  // Снежный шар — a music-box waltz wound up inside the glass, sleigh bells when you shake it
+  ST.demo_special = { meter:3, bpm:92, fn(H){
+    H.ks('pizz', 0, H.rm(-1), 0.07); H.each(H.chordM(0), (m)=> { H.ks('pizz', 1, m, 0.028); H.ks('pizz', 2, m, 0.024); });
+    H.mel((n)=> H.v(V.mbox, n.at, n.m, n.len, 0.065, { pan:0.15, dly:0.3 }), 1);
+    if(H.lvl >= 1) H.mel2((n)=> H.v(V.celesta, n.at, n.m, n.len, 0.035, { pan:-0.2 }), 0);
+    if(H.lvl >= 2) for(let b = 0; b < 3; b += 0.5) H.d('shaker', b, b % 1 ? 0.018 : 0.03);
+    if(H.newChord && H.lvl >= 1) H.pad({ timbre:'glass', attack:2, release:4 }, 0.03, 1);
   }};
 
   // ---------- a running patch ----------
@@ -5779,6 +6263,115 @@ const AMB = (function(){
       const a = c.createGain(); a.gain.setValueAtTime(0.0001, t); a.gain.exponentialRampToValueAtTime(gain || 0.2, t + dur * 0.3); a.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       s.connect(f); f.connect(a); a.connect(sfxBus); s.start(t); s.stop(t + dur + 0.05);
     },
+    // ---- cinematic one-shots (drop cinematics, the black hole) ----
+    // a reversed-cymbal swell: filtered noise opening up toward the hit
+    swell(seconds, gain){
+      const c = ensure(); if(!c || c.state !== 'running') return;
+      const t = c.currentTime, d = Math.max(0.3, seconds);
+      const s = noiseSrc(c, 'pink');
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 0.7;
+      lp.frequency.setValueAtTime(180, t); lp.frequency.exponentialRampToValueAtTime(5200, t + d);
+      const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 70;
+      const a = c.createGain(); a.gain.setValueAtTime(0.0001, t); a.gain.exponentialRampToValueAtTime(gain || 0.3, t + d); a.gain.linearRampToValueAtTime(0.0001, t + d + 0.04);
+      s.connect(lp); lp.connect(hp); hp.connect(a); a.connect(sfxBus); s.start(t); s.stop(t + d + 0.1);
+      const o = c.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(48, t); o.frequency.exponentialRampToValueAtTime(96, t + d);
+      const og = c.createGain(); og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime((gain || 0.3) * 0.5, t + d); og.gain.linearRampToValueAtTime(0.0001, t + d + 0.04);
+      o.connect(og); og.connect(sfxBus); o.start(t); o.stop(t + d + 0.1);
+    },
+    // a deep, dry impact: sub drop, a dark body of noise and a short transient
+    impact(gain, size){
+      const c = ensure(); if(!c || c.state !== 'running') return;
+      const t = c.currentTime, g = gain || 0.7, L = size || 1;
+      const o = c.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(72, t); o.frequency.exponentialRampToValueAtTime(26, t + 1.6 * L);
+      const og = c.createGain(); og.gain.setValueAtTime(g, t); og.gain.exponentialRampToValueAtTime(0.0001, t + 2.2 * L);
+      o.connect(og); og.connect(sfxBus); o.start(t); o.stop(t + 2.3 * L);
+      const s = noiseSrc(c, 'pink'); const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 0.9;
+      lp.frequency.setValueAtTime(1400, t); lp.frequency.exponentialRampToValueAtTime(110, t + 1.4 * L);
+      const sg = c.createGain(); sg.gain.setValueAtTime(g * 0.8, t); sg.gain.exponentialRampToValueAtTime(0.0001, t + 2.0 * L);
+      s.connect(lp); lp.connect(sg); sg.connect(sfxBus); s.start(t); s.stop(t + 2.1 * L);
+      const k = noiseSrc(c, 'white'); const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2400;
+      const kg = c.createGain(); kg.gain.setValueAtTime(g * 0.25, t); kg.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+      k.connect(hp); hp.connect(kg); kg.connect(sfxBus); k.start(t); k.stop(t + 0.1);
+    },
+    // a film-trailer "braam": a low brass cluster, slightly overdriven, opening and closing
+    braam(gain, seconds, root){
+      const c = ensure(); if(!c || c.state !== 'running') return;
+      const t = c.currentTime, d = seconds || 3, f0 = root || 49, g = gain || 0.25;
+      const shaper = c.createWaveShaper(); const curve = new Float32Array(1024);
+      for(let i = 0; i < 1024; i++){ const x = i / 511.5 - 1; curve[i] = Math.tanh(x * 2.2); }
+      shaper.curve = curve;
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 1.2;
+      lp.frequency.setValueAtTime(160, t); lp.frequency.exponentialRampToValueAtTime(1300, t + 0.18); lp.frequency.exponentialRampToValueAtTime(260, t + d);
+      const a = c.createGain(); a.gain.setValueAtTime(0.0001, t); a.gain.exponentialRampToValueAtTime(g, t + 0.07); a.gain.setValueAtTime(g, t + d * 0.35); a.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      shaper.connect(lp); lp.connect(a); a.connect(sfxBus);
+      [1, 1.5, 2, 2.38, 3].forEach((m, i)=>{
+        [-7, 6].forEach(cents=>{
+          const o = c.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f0 * m; o.detune.value = cents + (i === 3 ? -10 : 0);
+          const vg = c.createGain(); vg.gain.value = (i === 0 ? 0.32 : 0.2) / (1 + i * 0.4);
+          o.connect(vg); vg.connect(shaper); o.start(t); o.stop(t + d + 0.1);
+        });
+      });
+    },
+    // a cosmic roar: a resonant growl in the noise, an overdriven low saw cluster dropping in
+    // pitch, a howling formant and a sub that you feel more than hear; it swells for 'seconds'
+    roar(seconds, gain){
+      const c = ensure(); if(!c || c.state !== 'running') return;
+      const t = c.currentTime, d = Math.max(0.5, seconds), g = gain || 0.6;
+      const env = (node, peak, from)=>{ node.gain.setValueAtTime(0.0001, t); node.gain.exponentialRampToValueAtTime(peak * (from || 0.15), t + d * 0.25); node.gain.exponentialRampToValueAtTime(peak, t + d * 0.97); node.gain.linearRampToValueAtTime(0.0001, t + d + 0.05); };
+      // growl: noise through a resonant lowpass, amplitude-modulated like a throat
+      const n = noiseSrc(c, 'pink');
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 7;
+      lp.frequency.setValueAtTime(420, t); lp.frequency.exponentialRampToValueAtTime(140, t + d);
+      const am = c.createGain(); am.gain.value = 0.55;
+      const lfo = c.createOscillator(); lfo.type = 'triangle'; lfo.frequency.setValueAtTime(13, t); lfo.frequency.linearRampToValueAtTime(6, t + d);
+      const lfoG = c.createGain(); lfoG.gain.value = 0.45; lfo.connect(lfoG); lfoG.connect(am.gain);
+      const ng = c.createGain(); env(ng, g * 1.1);
+      n.connect(lp); lp.connect(am); am.connect(ng); ng.connect(sfxBus);
+      n.start(t); n.stop(t + d + 0.1); lfo.start(t); lfo.stop(t + d + 0.1);
+      // the beast: detuned saws dropping in pitch, driven hard
+      const shaper = c.createWaveShaper(); const curve = new Float32Array(1024);
+      for(let i = 0; i < 1024; i++){ const x = i / 511.5 - 1; curve[i] = Math.tanh(x * 4); }
+      shaper.curve = curve;
+      const slp = c.createBiquadFilter(); slp.type = 'lowpass'; slp.frequency.setValueAtTime(260, t); slp.frequency.exponentialRampToValueAtTime(700, t + d);
+      const sg = c.createGain(); env(sg, g * 0.5);
+      shaper.connect(slp); slp.connect(sg); sg.connect(sfxBus);
+      [41, 43.6, 46.2, 61.7].forEach((f, i)=>{
+        const o = c.createOscillator(); o.type = 'sawtooth';
+        o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.72, t + d);
+        const vg = c.createGain(); vg.gain.value = 0.3; o.connect(vg); vg.connect(shaper); o.start(t); o.stop(t + d + 0.1);
+      });
+      // a howl sweeping down through the formants
+      const h = noiseSrc(c, 'pink'); const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 9;
+      bp.frequency.setValueAtTime(950, t); bp.frequency.exponentialRampToValueAtTime(170, t + d);
+      const hg = c.createGain(); env(hg, g * 0.7, 0.05);
+      h.connect(bp); bp.connect(hg); hg.connect(sfxBus); h.start(t); h.stop(t + d + 0.1);
+      // the floor shaking
+      const sub = c.createOscillator(); sub.type = 'sine'; sub.frequency.setValueAtTime(34, t); sub.frequency.exponentialRampToValueAtTime(24, t + d);
+      const subG = c.createGain(); env(subG, g * 0.9, 0.3);
+      sub.connect(subG); subG.connect(sfxBus); sub.start(t); sub.stop(t + d + 0.1);
+    },
+    // the blast: a wall of noise collapsing from bright to a long rumble, a sub that drops to nothing
+    blast(gain){
+      const c = ensure(); if(!c || c.state !== 'running') return;
+      const t = c.currentTime, g = gain || 0.9;
+      const n = noiseSrc(c, 'white'); const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 0.8;
+      lp.frequency.setValueAtTime(7000, t); lp.frequency.exponentialRampToValueAtTime(70, t + 3.5);
+      const ng = c.createGain(); ng.gain.setValueAtTime(g * 0.9, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 4.2);
+      n.connect(lp); lp.connect(ng); ng.connect(sfxBus); n.start(t); n.stop(t + 4.3);
+      const r = noiseSrc(c, 'pink'); const rl = c.createBiquadFilter(); rl.type = 'lowpass'; rl.frequency.value = 130;
+      const rg = c.createGain(); rg.gain.setValueAtTime(0.0001, t); rg.gain.exponentialRampToValueAtTime(g * 1.2, t + 0.3); rg.gain.exponentialRampToValueAtTime(0.0001, t + 6.5);
+      r.connect(rl); rl.connect(rg); rg.connect(sfxBus); r.start(t); r.stop(t + 6.6);
+      const o = c.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(90, t); o.frequency.exponentialRampToValueAtTime(18, t + 4);
+      const og = c.createGain(); og.gain.setValueAtTime(g, t); og.gain.exponentialRampToValueAtTime(0.0001, t + 4.5);
+      o.connect(og); og.connect(sfxBus); o.start(t); o.stop(t + 4.6);
+      const shaper = c.createWaveShaper(); const curve = new Float32Array(1024);
+      for(let i = 0; i < 1024; i++){ const x = i / 511.5 - 1; curve[i] = Math.tanh(x * 5); }
+      shaper.curve = curve;
+      const th = c.createOscillator(); th.type = 'sawtooth'; th.frequency.setValueAtTime(65, t); th.frequency.exponentialRampToValueAtTime(22, t + 0.9);
+      const tl = c.createBiquadFilter(); tl.type = 'lowpass'; tl.frequency.value = 500;
+      const tg = c.createGain(); tg.gain.setValueAtTime(g * 0.5, t); tg.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+      th.connect(shaper); shaper.connect(tl); tl.connect(tg); tg.connect(sfxBus); th.start(t); th.stop(t + 1.3);
+    },
     sub(gain){
       const c = ensure(); if(!c || c.state !== 'running') return;
       const t = c.currentTime;
@@ -5856,9 +6449,12 @@ function makeShaderLayer(canvasId, rafKey, fragSrc, opts){
     document.body.appendChild(canvas);
   }
   let gl = null;
+  // opts.webgl2: the shader is GLSL ES 3.00 (loops it can bound by a uniform, so Windows' HLSL
+  // compiler doesn't unroll them into minutes of compile time)
+  const gl2 = !!opts.webgl2;
   try{
-    gl = canvas.getContext('webgl', { antialias:false, alpha:!!opts.alpha, premultipliedAlpha:true, depth:false, stencil:false, powerPreference:'low-power', preserveDrawingBuffer:false })
-      || canvas.getContext('experimental-webgl');
+    const attrs = { antialias:false, alpha:!!opts.alpha, premultipliedAlpha:true, depth:false, stencil:false, powerPreference:'low-power', preserveDrawingBuffer:false };
+    gl = gl2 ? canvas.getContext('webgl2', attrs) : (canvas.getContext('webgl', attrs) || canvas.getContext('experimental-webgl'));
   }catch(e){ gl = null; }
   if(!gl){ canvas.remove(); return null; }
 
@@ -5872,7 +6468,7 @@ function makeShaderLayer(canvasId, rafKey, fragSrc, opts){
     }
     return s;
   }
-  const vs = compile(gl.VERTEX_SHADER, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }');
+  const vs = compile(gl.VERTEX_SHADER, gl2 ? '#version 300 es\nin vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }' : 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }');
   const fs = compile(gl.FRAGMENT_SHADER, fragSrc);
   if(!vs || !fs){ canvas.remove(); return null; }
   const prog = gl.createProgram();
@@ -5880,23 +6476,32 @@ function makeShaderLayer(canvasId, rafKey, fragSrc, opts){
   gl.attachShader(prog, fs);
   gl.bindAttribLocation(prog, 0, 'a');
   gl.linkProgram(prog);
-  if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
-    console.warn('[theme shader] link ' + canvasId + ': ' + gl.getProgramInfoLog(prog));
-    canvas.remove();
-    return null;
-  }
-  gl.useProgram(prog);
-  // one oversized triangle covers the whole viewport (no diagonal seam)
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  // opts.async: link in the background (KHR_parallel_shader_compile) and fade the layer in
+  // once it's ready, so a big scene never freezes the page while the GPU driver compiles it
+  const par = opts.async ? gl.getExtension('KHR_parallel_shader_compile') : null;
+  let ready = false;
+  const finishLink = ()=>{
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+      console.warn('[theme shader] link ' + canvasId + ': ' + gl.getProgramInfoLog(prog));
+      return false;
+    }
+    gl.useProgram(prog);
+    // one oversized triangle covers the whole viewport (no diagonal seam)
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    ready = true;
+    return true;
+  };
+  if(par) canvas.style.opacity = '0';
+  else if(!finishLink()){ canvas.remove(); return null; }
 
   const locs = {};
   const U = (name)=> (name in locs) ? locs[name] : (locs[name] = gl.getUniformLocation(prog, name));
 
-  const baseScale = (opts.scale || 0.55) * GFX.scaleMul();
+  const baseScale = GFX.mode === 'ultra' ? GFX.ultraScale() : (opts.scale || 0.55) * GFX.scaleMul();
   let scale = baseScale;
   const fr = {};
   function resize(){
@@ -5930,6 +6535,12 @@ function makeShaderLayer(canvasId, rafKey, fragSrc, opts){
     window[rafKey] = requestAnimationFrame(frame);
     if(lost) return;
     if(!GFX.gate(fr, ts || performance.now(), opts.kind || 'bg')) return;
+    if(!ready){
+      if(!gl.getProgramParameter(prog, par.COMPLETION_STATUS_KHR)) return;
+      if(!finishLink()){ lost = true; canvas.remove(); return; }
+      canvas.style.transition = 'opacity .9s ease';
+      requestAnimationFrame(()=>{ canvas.style.opacity = ''; });
+    }
     const t = layer.now();
     const dt = Math.min(0.1, Math.max(0, t - last));
     last = t;
@@ -5937,6 +6548,7 @@ function makeShaderLayer(canvasId, rafKey, fragSrc, opts){
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.uniform2f(U('u_res'), canvas.width, canvas.height);
     gl.uniform1f(U('u_time'), t);
+    gl.uniform1f(U('u_hq'), GFX.mode === 'ultra' ? 1 : 0);
     if(opts.frame) opts.frame(gl, U, t, dt);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -6442,7 +7054,8 @@ const ATMOS_PRESETS = {
 
   // ---------------- Особенный (event / limited) ----------------
   cool_summer:{ bg0:'#0a7ab8', bg1:'#7fe0ff', acc:'#fff2a8', acc2:'#ffffff', motif:2, motif2:1, part:3, shape:1, dens:0.08, speed:0.5, size:0.9, flow:0.1, glow:0.3, wm:'SUMMER', mat:'glass' },
-  blood_moon: { bg0:'#060000', bg1:'#2a0404', acc:'#e0202a', acc2:'#ff9a6a', motif:19, motif2:7, part:3, shape:0, dens:0.08, speed:0.3, size:0.7, flow:0.25, glow:0.35, wm:'BLOOD MOON', mat:'glass' },
+  // (blood_moon переведён на свой шейдер — см. V2_SHADERS)
+  // mechanical по классу Неплохой, но оформлен по-полному (glass + свой трек) — так задумано
   mechanical: { bg0:'#0e0c0a', bg1:'#2e2820', acc:'#d89a3a', acc2:'#8a7a6a', motif:6, motif2:7, part:1, shape:1, dens:0.08, speed:0.9, size:0.7, flow:0.15, glow:0.2, wm:'MECHANICAL', mat:'glass', gears:true }
 };
 
@@ -6520,10 +7133,13 @@ function teardownThemeV2(){
 
 // bespoke shader themes register themselves here (Хороший and above)
 const V2_SHADERS = {};
+// demo themes (admin only, see DEMO_THEMES) register their builders here
+const DEMO_APPLY = {};
 
 // rank → tier
 function v2TierFor(id){
   if(!id || V2_KEEP_LEGACY.has(id)) return null;
+  if(DEMO_APPLY[id]) return 'demo';
   if(V2_SHADERS[id]) return 'bespoke';
   if(ATMOS_PRESETS[id]) return 'atmos';
   if(V2_PATTERNS[id]) return 'pattern';
@@ -6612,9 +7228,13 @@ function applyThemeV2(id, p){
     root.style.setProperty('--spin-btn-bg', `linear-gradient(180deg, ${a1}, ${a2})`);
     root.style.setProperty('--spin-btn-fg', lum(a1) > 0.6 ? '#141414' : '#ffffff');
   }
-  if(tier === 'atmos' || tier === 'bespoke'){
+  if(tier === 'atmos' || tier === 'bespoke' || tier === 'demo'){
     const vg = document.getElementById('theme-vignette');
     if(vg){ vg.classList.remove('show'); vg.style.opacity = '0'; }
+  }
+  if(tier === 'demo'){
+    DEMO_APPLY[id](id, p);
+    return true;
   }
 
   if(tier === 'plain'){
@@ -6737,12 +7357,12 @@ const FBM_GLSL = `
 function v2Bespoke(id, frag, o){
   document.body.classList.add('v2-bespoke-on', 'theme-v2-' + id);
   if(o.wm) createSimpleWatermark('v2-watermark', o.wm, o.wmColor || '#ffffff');
-  if(o.mat) v2Material('glass', o.mat);
+  if(o.mat) v2Material(o.matKind || 'glass', o.mat);
   const root = document.documentElement;
   if(o.spin){ root.style.setProperty('--spin-btn-bg', o.spin[0]); root.style.setProperty('--spin-btn-fg', o.spin[1]); }
   let st = null;
   const layer = makeShaderLayer('v2s-canvas', '_v2sRafId', frag, {
-    scale: o.scale || 0.5,
+    scale: o.scale || 0.5, webgl2: o.webgl2, async: o.async,
     frame: (gl, U, t, dt)=>{ if(o.frame) o.frame(gl, U, t, dt, st); }
   });
   if(layer){
@@ -6870,77 +7490,212 @@ V2_SHADERS.chrono = function(id){
 };
 
 // ------------------------------------------------------------
-// КЛЕВЕР — a clover meadow from above. Wind rolls across it in waves; the
-// cursor finds four-leaf clovers hidden among the three-leaf ones (they
-// light up gold near it); a click sends a gust out from that point.
+// КЛЕВЕР — a golden-hour clover meadow seen from knee height. Rows of
+// clover heads recede to rolling hills under a low sun with a rainbow;
+// every head is lit like a little 3D object (creased leaflets, pale
+// chevrons, dew, back-light). Wind waves roll across the field. The
+// cursor makes hidden four-leaf clovers glow gold; a click sends a gust
+// and a burst of golden luck.
 // ------------------------------------------------------------
 V2_SHADERS.clover = function(id){
   const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
     uniform vec2 u_res; uniform float u_time; uniform vec2 u_ptr; uniform float u_ptrOn; uniform vec3 u_gust;
-    float ASP;
-    vec4 leafLayer(vec2 p, float S, float t, float layer, float wind){
-      vec2 g = p * S; vec2 id = floor(g); vec2 f = fract(g) - 0.5;
-      float h = hash(id + layer * 17.0);
-      vec2 off = (vec2(hash(id + 1.3), hash(id + 2.9)) - 0.5) * 0.3;
-      vec2 q = f - off;
-      float rot = h * 6.2831 + wind * 0.5 * (hash(id + 4.4) - 0.3);
-      float c = cos(rot), s = sin(rot);
-      q = vec2(c * q.x - s * q.y, s * q.x + c * q.y);
-      bool lucky = h > 0.985;
-      float n = lucky ? 2.0 : 1.5;
-      float r = length(q); float a = atan(q.y, q.x);
-      float R = 0.36 * (0.8 + 0.3 * hash(id + 7.0));
-      float lobes = abs(cos(a * n));
-      float d = r - R * (0.25 + 0.75 * sqrt(lobes));
-      float vein = smoothstep(0.03, 0.0, abs(sin(a * n)) * r) * step(r, R * 0.9);
-      float m = smoothstep(0.02, -0.02, d);
-      return vec4(m, vein, lucky ? 1.0 : 0.0, h);
+    float ASP; float T;
+    const float HZ = 0.43;
+    const vec3 WARM = vec3(1.0, 0.82, 0.52);
+    const vec3 HAZE = vec3(0.86, 0.88, 0.70);
+    vec2 SUN;
+    float dot2(vec2 v){ return dot(v, v); }
+    float sdHeart(vec2 p){
+      p.x = abs(p.x);
+      if(p.y + p.x > 1.0) return sqrt(dot2(p - vec2(0.25, 0.75))) - 0.35355;
+      return sqrt(min(dot2(p - vec2(0.0, 1.0)), dot2(p - 0.5 * max(p.x + p.y, 0.0)))) * sign(p.x - p.y);
     }
+    vec2 rot(vec2 v, float a){ float c = cos(a), s = sin(a); return vec2(c * v.x - s * v.y, s * v.x + c * v.y); }
+
+    vec3 skyCol(vec2 p, float y){
+      vec3 c = mix(vec3(1.0, 0.84, 0.60), vec3(0.50, 0.70, 0.86), smoothstep(HZ, 0.8, y));
+      c = mix(c, vec3(0.24, 0.45, 0.76), smoothstep(0.75, 1.1, y));
+      float ds = length(p - SUN);
+      c += WARM * exp(-ds * 5.0) * 0.55 + vec3(1.0, 0.95, 0.8) * exp(-ds * 22.0) * 0.6;
+      c = mix(c, vec3(1.0, 0.99, 0.92), smoothstep(0.045, 0.038, ds));
+      // soft clouds, warm underneath
+      vec2 cq = vec2(p.x * 0.9 + T * 0.008, p.y * 3.2);
+      float cl = smoothstep(0.5, 0.78, fbm(cq)) * smoothstep(HZ + 0.06, 0.62, y);
+      vec3 cc = mix(vec3(1.0, 0.78, 0.62), vec3(1.0, 0.97, 0.94), smoothstep(0.55, 0.85, fbm(cq + vec2(0.0, 0.25))));
+      c = mix(c, cc, cl * 0.75);
+      // rainbow
+      float r = length(p - vec2(ASP * 0.28, HZ - 0.32));
+      float f = (r - 0.72) / 0.07;
+      if(f > 0.0 && f < 1.0){
+        vec3 rb = 0.5 + 0.5 * cos(6.2831 * (f * 0.8 + vec3(0.0, 0.33, 0.67)));
+        c = mix(c, c + rb * 0.35, sin(f * 3.1416) * 0.55 * smoothstep(HZ, HZ + 0.12, y) * (1.0 - cl));
+      }
+      return c;
+    }
+    float hill(float x, float k){ return HZ + 0.02 + k * 0.02 + (0.10 - k * 0.03) * fbm3(vec2(x * (1.2 + k * 0.9) + k * 7.0, k * 3.0)); }
+
+    // one clover head; returns (mask, shade, lucky, dist)
+    vec3 LEAF;
+    float cloverHead(vec2 q, float n, float rot0, float h, float aa, float lucky, float near, float f){
+      float best = 9.0; vec2 bl = vec2(0.0); float ba = 0.0;
+      for(int k = 0; k < 4; k++){
+        if(float(k) < n){
+          float a = rot0 + float(k) * 6.2831 / n;
+          vec2 lq = rot(q, -a + 1.5708);
+          float d = sdHeart(lq / 0.46) * 0.46;
+          if(d < best){ best = d; bl = lq; ba = a; }
+        }
+      }
+      float m = smoothstep(aa, -aa, best);
+      if(m <= 0.0) return 0.0;
+      // shading: crease along the midrib, dome, edges rolling over
+      vec2 nl = vec2(sign(bl.x) * 0.55 * smoothstep(0.0, 0.06, abs(bl.x)), (bl.y - 0.22) * 0.9);
+      nl += normalize(bl + 1e-4) * smoothstep(-0.07, 0.0, best) * 0.9;
+      vec3 N = normalize(vec3(rot(nl, ba - 1.5708), 1.0));
+      vec3 L = normalize(vec3(0.55, 0.45, 0.7));
+      float dif = max(dot(N, L), 0.0);
+      float spec = pow(max(dot(reflect(-L, N), vec3(0.0, 0.0, 1.0)), 0.0), 28.0);
+      vec3 base = mix(vec3(0.10, 0.36, 0.10), vec3(0.30, 0.62, 0.18), h);
+      float chev = smoothstep(0.035, 0.0, abs(length(bl) * 0.9 - 0.17 - abs(bl.x) * 0.55)) * step(0.06, bl.y);
+      base = mix(base, vec3(0.62, 0.82, 0.48), chev * 0.45);
+      base *= 1.0 - 0.35 * smoothstep(0.018, 0.0, abs(bl.x)) * step(0.02, bl.y);
+      if(lucky > 0.5){
+        float sh = 0.5 + 0.5 * sin(T * 3.0 + h * 30.0);
+        base = mix(base, vec3(1.0, 0.80, 0.25), 0.25 + 0.6 * near + 0.1 * sh);
+      }
+      vec3 c = base * (0.35 + 0.85 * dif) + vec3(1.0, 0.97, 0.85) * spec * (0.25 + 0.5 * f);
+      // sun shining through the leaf edge
+      c += vec3(0.75, 0.85, 0.25) * smoothstep(-0.05, 0.0, best) * 0.35;
+      // dew
+      if(f > 0.5 && hash(vec2(h * 91.0, ba)) > 0.7){
+        float dw = length(bl - vec2(0.06, 0.26));
+        c = mix(c, vec3(0.75, 0.9, 0.85), smoothstep(0.045, 0.03, dw) * 0.6);
+        c += vec3(1.0) * smoothstep(0.016, 0.0, length(bl - vec2(0.072, 0.275))) * 0.9;
+      }
+      c += vec3(1.0, 0.85, 0.4) * near * lucky * 0.5;
+      c = mix(c, HAZE, (1.0 - f) * 0.55);
+      LEAF = c;
+      return m;
+    }
+
     void main(){
       vec2 uv = gl_FragCoord.xy / u_res;
       ASP = u_res.x / u_res.y;
+      T = u_time;
       vec2 p = vec2(uv.x * ASP, uv.y);
-      float t = u_time;
-      // wind: bands of brighter, bent leaves rolling across
-      float wind = pow(0.5 + 0.5 * sin(dot(p, vec2(0.8, 0.6)) * 5.0 - t * 1.4 + fbm3(p * 2.0) * 3.0), 3.0);
-      float age = t - u_gust.z;
-      if(age > 0.0 && age < 3.0){
-        float b = length(p - vec2(u_gust.x * ASP, u_gust.y)) - age * 0.6;
-        wind += exp(-b * b * 40.0) * exp(-age) * 2.0;
-      }
-      vec3 col = mix(vec3(0.03, 0.12, 0.04), vec3(0.06, 0.2, 0.06), fbm3(p * 3.0));
+      SUN = vec2(ASP * 0.76, HZ + 0.14);
       vec2 cp = vec2(u_ptr.x * ASP, u_ptr.y);
-      float near = exp(-dot(p - cp, p - cp) * 14.0) * u_ptrOn;
-      for(int L = 0; L < 2; L++){
-        float fl = float(L);
-        vec2 pp = p + vec2(0.0, fl * 0.37) + vec2(0.01, 0.006) * sin(t * 0.6 + fl) * wind;
-        vec4 lf = leafLayer(pp, 9.0 + fl * 5.0, t, fl, wind);
-        vec3 green = mix(vec3(0.12, 0.42, 0.12), vec3(0.32, 0.68, 0.22), lf.w) * (0.7 + fl * 0.25);
-        green *= 0.85 + 0.45 * wind;
-        green = mix(green, green * 0.6, lf.y * 0.6);
-        if(lf.z > 0.5){
-          green = mix(green, vec3(1.0, 0.82, 0.3), 0.35 + near * 0.65);
-          col += vec3(1.0, 0.8, 0.3) * lf.x * near * 0.6;
+      float gAge = T - u_gust.z;
+      vec2 gp = vec2(u_gust.x * ASP, u_gust.y);
+
+      vec3 col = skyCol(p, uv.y);
+      // three hill layers fading into haze
+      for(int k = 0; k < 3; k++){
+        float fk = float(k);
+        float hh = hill(p.x, fk);
+        float hmk = smoothstep(hh + 1.5 / u_res.y, hh - 1.5 / u_res.y, uv.y);
+        if(hmk > 0.0){
+          vec3 hc = mix(vec3(0.42, 0.58, 0.40), vec3(0.24, 0.50, 0.16), fk / 2.0);
+          hc *= 0.85 + 0.3 * smoothstep(hh - 0.04, hh, uv.y);
+          // trees dotted along the ridges
+          float tr = smoothstep(0.55, 0.75, noise(vec2(p.x * 26.0, fk))) * smoothstep(hh - 0.02, hh - 0.006, uv.y) * smoothstep(hh + 0.002, hh - 0.004, uv.y);
+          hc = mix(hc, hc * 0.55, tr);
+          hc = mix(hc, HAZE, 0.55 - fk * 0.22);
+          col = mix(col, hc, hmk);
         }
-        col = mix(col * (1.0 - 0.35 * lf.x), green, lf.x);
       }
-      // dappled sun
-      col *= 0.8 + 0.35 * smoothstep(0.35, 0.75, fbm(p * 1.5 + t * 0.03));
+      // meadow floor
+      float gy = HZ + 0.02;
+      if(uv.y < gy){
+        float dpt = smoothstep(gy, -0.1, uv.y);
+        vec3 gc = mix(vec3(0.42, 0.60, 0.22), vec3(0.08, 0.24, 0.06), dpt);
+        gc *= 0.8 + 0.35 * fbm3(vec2(p.x * 6.0, p.y * 18.0 / (0.3 + dpt)));
+        gc = mix(gc, HAZE, (1.0 - dpt) * 0.45 * step(hill(p.x, 2.0), uv.y));
+        if(uv.y < hill(p.x, 2.0)) col = mix(col, gc, smoothstep(0.0, 0.05, hill(p.x, 2.0) - uv.y));
+      }
+
+      // rows of clover, far to near
+      for(int L = 0; L < 7; L++){
+        float f = float(L) / 6.0;
+        float S = 0.012 + 0.15 * pow(f, 1.8);
+        float yb = HZ - 0.03 - 0.46 * f * f - 0.03 * f;
+        float sq = mix(0.45, 0.8, f);
+        float sp = S * 1.6;
+        float off = float(L) * 0.371;
+        if(uv.y > yb + S * 2.6 || uv.y < yb - S) continue;
+        float ix = floor((p.x + off) / sp);
+        float aa = 1.4 / (u_res.y * S);
+        for(int c = 0; c < 4; c++){
+          float cid = ix + float(c) - 1.5;
+          vec2 id2 = vec2(cid, float(L));
+          float h = hash(id2);
+          float bx = (cid + 0.5) * sp - off + (hash(id2 + 3.1) - 0.5) * sp * 0.6;
+          float wave = pow(0.5 + 0.5 * sin(bx * 2.4 - T * 1.2 + fbm3(vec2(bx, T * 0.1)) * 2.0), 3.0);
+          float sway = 0.25 * sin(T * 1.7 + h * 6.28) + 0.9 * wave;
+          if(gAge > 0.0 && gAge < 3.0){
+            float ring = abs(bx - gp.x) - gAge * 0.7;
+            sway += exp(-ring * ring * 30.0) * exp(-gAge * 1.2) * 2.5 * sign(bx - gp.x);
+          }
+          vec2 hc = vec2(bx + S * 0.35 * sway, yb + S * (1.2 + 0.8 * hash(id2 + 5.7)));
+          // stem
+          vec2 ba = hc - vec2(bx, yb - S * 0.5), pa = p - vec2(bx, yb - S * 0.5);
+          float th = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+          float sd = length(pa - ba * th) - S * 0.045;
+          vec3 stemC = mix(mix(vec3(0.08, 0.28, 0.06), vec3(0.3, 0.55, 0.16), th), HAZE, (1.0 - f) * 0.55);
+          col = mix(col, stemC, smoothstep(1.2 / u_res.y, -1.2 / u_res.y, sd));
+          // soft shadow the head throws on what's behind
+          vec2 q = (p - hc) / S; q.y /= sq;
+          col *= 1.0 - 0.28 * smoothstep(0.75, 0.2, length(q + vec2(-0.12, 0.35))) * f;
+          float lucky = step(0.93, hash(id2 + 9.3));
+          float near = exp(-dot(hc - cp, hc - cp) * 18.0) * u_ptrOn;
+          float m = cloverHead(q, lucky > 0.5 ? 4.0 : 3.0, h * 6.28 + sway * 0.2, h, aa, lucky, near, f);
+          col = mix(col, LEAF, m);
+          if(lucky > 0.5) col += vec3(1.0, 0.8, 0.3) * exp(-length(q) * 2.5) * (0.12 + 0.5 * near) * (1.0 - m);
+        }
+      }
+
+      // god rays from the low sun
+      vec2 sv = p - SUN;
+      vec2 dir = sv / (length(sv) + 1e-4);
+      float rays = pow(noise(dir * 7.0 + vec2(T * 0.12, 0.0)), 3.0) * smoothstep(0.04, 0.2, length(sv));
+      col += WARM * rays * exp(-length(sv) * 1.6) * 0.45 * step(HZ - 0.15, uv.y);
       // golden luck motes drifting up
-      vec2 g = (p + vec2(0.0, -t * 0.05)) * 14.0; vec2 id = floor(g);
-      float hm = hash(id + 9.0);
-      float mote = step(0.94, hm) * smoothstep(0.12, 0.0, length(fract(g) - 0.5 - (vec2(hash(id + 3.0), hash(id + 5.0)) - 0.5) * 0.6));
-      col += vec3(1.0, 0.85, 0.4) * mote * (0.5 + 0.5 * sin(t * 3.0 + hm * 40.0));
-      col += vec3(1.0, 0.9, 0.5) * near * 0.08;
-      vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * 0.7;
+      for(int i = 0; i < 2; i++){
+        float fi = float(i);
+        vec2 g = (p + vec2(T * 0.01 * (fi + 1.0), -T * (0.04 + fi * 0.03))) * (10.0 - fi * 4.0); vec2 id = floor(g);
+        float hm = hash(id + 9.0 + fi * 13.0);
+        vec2 mp = fract(g) - 0.5 - (vec2(hash(id + 3.0), hash(id + 5.0)) - 0.5) * 0.6;
+        float mote = step(0.9, hm) * exp(-dot(mp, mp) * (220.0 - fi * 150.0));
+        col += vec3(1.0, 0.85, 0.4) * mote * (0.45 + 0.4 * sin(T * 3.0 + hm * 40.0)) * (0.8 + fi * 0.4);
+      }
+      // click: burst of golden sparks
+      if(gAge > 0.0 && gAge < 2.0){
+        for(int i = 0; i < 18; i++){
+          float fi = float(i);
+          float an = fi * 2.399 + u_gust.z;
+          vec2 sp2 = gp + vec2(cos(an), sin(an)) * gAge * (0.25 + 0.2 * hash(vec2(fi, u_gust.z))) - vec2(0.0, gAge * gAge * 0.06);
+          col += vec3(1.0, 0.85, 0.35) * exp(-dot(p - sp2, p - sp2) * 9000.0) * (1.0 - gAge * 0.5) * 1.6;
+        }
+        col += WARM * exp(-length(p - gp) * 8.0) * exp(-gAge * 3.0) * 0.4;
+      }
+      // warm light around the cursor
+      col += WARM * exp(-dot(p - cp, p - cp) * 12.0) * u_ptrOn * 0.07;
+      // grade + vignette
+      col = col / (1.0 + col * 0.18);
+      col = mix(col, col * vec3(1.05, 1.0, 0.9), 0.5);
+      vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * 0.55;
+      // sun disk on top so the grade never greys it out (hidden behind the hills)
+      float sunM = smoothstep(0.05, 0.036, length(sv)) * smoothstep(hill(p.x, 0.0) - 0.002, hill(p.x, 0.0) + 0.002, uv.y);
+      col = mix(col, vec3(1.0, 0.98, 0.9), sunM);
       gl_FragColor = vec4(col, 1.0);
     }
   `;
   const gust = [0, 0, -100];
   let ptrOn = 0;
   v2Bespoke(id, FRAG, {
-    scale: 0.55, wm: 'LUCK', wmColor: '#c8f0a0',
-    mat: { bg0:'#062a0c', acc:'#ffd760' }, spin: ['linear-gradient(180deg,#5fd06a,#1f8a35 60%,#14662a)', '#ffffff'],
+    scale: 0.75, wm: 'LUCK', wmColor: '#fff2c0',
+    mat: { bg0:'#1d4a14', acc:'#ffd760' }, spin: ['linear-gradient(180deg,#5fd06a,#1f8a35 60%,#14662a)', '#ffffff'],
     frame: (gl, U, t, dt, st)=>{
       ptrOn = ease(ptrOn, (st && performance.now() - st.moved < 2500) ? 1 : 0, 0.1, dt);
       gl.uniform2f(U('u_ptr'), st ? st.x / window.innerWidth : 0.5, st ? 1 - st.y / window.innerHeight : 0.5);
@@ -9026,107 +9781,275 @@ V2_SHADERS.echo = function(id){
 
 
 // ------------------------------------------------------------
-// ПЫЛЬЦА — inside the hive at golden hour. A wall of wax cells, some
-// brimming with honey that catches the light, some capped; pollen floats
-// through the warm air in front, the nearest grains out of focus. The
-// light follows the cursor across the honey; a click bursts a cloud of
-// pollen from where you point.
+// ПЫЛЬЦА — inside a sunlit hive. A wall of honeycomb runs off into the
+// warm haze in perspective; every cell is a real hollow (you see its inner
+// walls shift as the angle changes), most brimming with glossy honey, some
+// capped with wax, a few empty; honey drips down the comb. Striped, fuzzy
+// bees with flickering wings buzz around and cast soft shadows on the comb;
+// pollen dust drifts in the light shafts. The light follows the cursor and
+// half the bees come to circle it; a click scatters the bees and puffs out
+// a cloud of pollen.
 // ------------------------------------------------------------
 V2_SHADERS.pollen = function(id){
   const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
-    uniform vec2 u_res; uniform float u_time; uniform vec2 u_light; uniform vec3 u_burst;
-    float ASP;
-    // hex grid: returns (cell center, local offset)
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_light; uniform vec3 u_burst; uniform float u_ptrOn;
+    float ASP; float T;
+    const vec3 GOLD = vec3(1.0, 0.78, 0.32);
+    const vec3 WAX = vec3(0.93, 0.66, 0.26);
+    const float WI = 0.43;
     vec4 hexCell(vec2 p){
       const vec2 s = vec2(1.0, 1.7320508);
       vec4 hc = floor(vec4(p, p - vec2(0.5, 1.0)) / s.xyxy) + 0.5;
       vec4 h = vec4(p - hc.xy * s, p - (hc.zw + 0.5) * s);
       return dot(h.xy, h.xy) < dot(h.zw, h.zw) ? vec4(h.xy, hc.xy) : vec4(h.zw, hc.zw + 9.43);
     }
-    float hexDist(vec2 p){ p = abs(p); return max(dot(p, normalize(vec2(1.0, 1.7320508))), p.x); }
+    float hexDist(vec2 p){ p = abs(p); return max(dot(p, vec2(0.5, 0.8660254)), p.x); }
+    vec2 rot(vec2 v, float a){ float c = cos(a), s = sin(a); return vec2(c * v.x - s * v.y, s * v.x + c * v.y); }
+
+    // ---- the comb ----
+    vec3 comb(vec2 uv, out float depthT){
+      vec3 rd = normalize(vec3((uv - 0.5) * vec2(ASP, 1.0), 1.4));
+      vec3 n = normalize(vec3(-0.5, 0.14, -1.0));
+      vec3 P0 = vec3(0.0, 0.0, 2.6);
+      float t = dot(P0, n) / dot(rd, n);
+      depthT = t;
+      vec3 P = rd * t;
+      vec3 e1 = normalize(cross(n, vec3(0.0, 1.0, 0.0)));
+      vec3 e2 = cross(e1, n);
+      vec2 pc = vec2(dot(P - P0, e1), dot(P - P0, e2)) * 4.6;
+      vec3 Vin = vec3(dot(rd, e1), dot(rd, e2), dot(rd, -n));
+      vec3 Vc = vec3(-Vin.xy, Vin.z);
+      vec3 LPw = vec3((u_light.x - 0.5) * ASP * 2.6, (u_light.y - 0.5) * 2.6, 1.1);
+      vec3 Lw = LPw - P; float ld = length(Lw); Lw /= ld;
+      vec3 Lp = vec3(dot(Lw, e1), dot(Lw, e2), dot(Lw, n));
+      float lightK = 0.45 + 1.2 / (1.0 + ld * ld * 0.7);
+      vec4 hc = hexCell(pc); vec2 q = hc.xy; vec2 id = hc.zw;
+      float h = hash(id);
+      float hd = hexDist(q);
+      vec2 par = Vin.xy / max(Vin.z, 0.25);
+      vec3 col;
+      if(hd > WI){
+        // the wax rim, bevelled
+        vec2 g = q / max(length(q), 1e-3);
+        float bev = (hd - (WI + 0.5) * 0.5) / (0.5 - WI) * 2.0;
+        vec3 N = normalize(vec3(g * bev * 0.8, 1.0));
+        float dif = max(dot(N, Lp), 0.0);
+        float spe = pow(max(dot(reflect(-Lp, N), Vc), 0.0), 24.0);
+        col = WAX * (0.3 + 0.85 * dif) * lightK + vec3(1.0, 0.9, 0.7) * spe * 0.35;
+      } else if(h > 0.6 && h < 0.84){
+        // capped with wax: a soft dome with a wrinkled skin
+        float dome = sqrt(max(0.0, 1.0 - pow(hd / WI, 2.0)));
+        vec3 N = normalize(vec3(q * 2.2 + (vec2(noise(q * 7.0 + id), noise(q * 7.0 - id)) - 0.5) * 0.25, 1.0));
+        float dif = max(dot(N, Lp), 0.0);
+        vec3 capC = mix(vec3(0.78, 0.48, 0.14), vec3(1.0, 0.8, 0.42), dome);
+        col = capC * (0.35 + 0.8 * dif) * lightK;
+        col *= 1.0 - 0.3 * smoothstep(0.3, WI, hd);
+      } else {
+        bool honey = h <= 0.6;
+        float D = honey ? 0.22 + 0.12 * hash(id + 3.0) : 1.4;
+        vec2 qs = q + par * D;
+        if(hexDist(qs) < WI){
+          if(honey){
+            float m = smoothstep(0.2, WI, hexDist(qs));
+            vec3 N = normalize(vec3(-qs * 2.4 * m, 1.0));
+            float spe = pow(max(dot(reflect(-Lp, N), Vc), 0.0), 70.0);
+            float fres = pow(1.0 - max(Vc.z, 0.0), 3.0);
+            vec3 honeyC = mix(vec3(0.95, 0.55, 0.06), vec3(0.42, 0.16, 0.01), m * 0.8);
+            col = honeyC * (0.55 + 0.6 * max(dot(N, Lp), 0.0)) * lightK;
+            col += vec3(1.0, 0.6, 0.12) * 0.25 * lightK * (1.0 - m);   // light glowing through
+            col += vec3(1.0, 0.95, 0.8) * spe * 1.6 * lightK;
+            col += vec3(1.0, 0.8, 0.45) * fres * 0.25;
+          } else {
+            col = mix(vec3(0.06, 0.03, 0.01), vec3(0.22, 0.12, 0.04), smoothstep(WI, 0.0, hexDist(qs))) * lightK * 0.7;
+          }
+        } else {
+          // the inner wall of the cell, found by bisection along the view ray
+          float lo = 0.0, hi = D;
+          for(int k = 0; k < 6; k++){
+            float mid = 0.5 * (lo + hi);
+            if(hexDist(q + par * mid) < WI) lo = mid; else hi = mid;
+          }
+          vec2 qw = q + par * lo;
+          vec3 Nw = vec3(-qw / max(length(qw), 1e-3), 0.0);
+          float dif = max(dot(Nw, Lp), 0.0);
+          col = WAX * 0.8 * (0.25 + 0.9 * dif) * exp(-lo * 1.4) * lightK;
+          if(honey) col = mix(col, vec3(0.7, 0.35, 0.04) * lightK, 0.35);
+        }
+      }
+      // honey drips running down the comb
+      float cx = floor(pc.x + 0.5);
+      float dh = hash(vec2(cx, 41.0));
+      if(dh > 0.72){
+        float dx = cx + (hash(vec2(cx, 7.0)) - 0.5) * 0.5;
+        float y0 = (hash(vec2(cx, 9.0)) - 0.5) * 5.0;
+        float L = mod(T * 0.12 + dh * 17.0, 3.0) + 0.3;
+        float yy = y0 - pc.y;
+        float wdt = 0.05 + 0.03 * smoothstep(0.0, L, yy);
+        float bulb = length(vec2(pc.x - dx, pc.y - (y0 - L))) - 0.11;
+        float stream = max(abs(pc.x - dx) - wdt, max(-yy, yy - L));
+        float dd = min(bulb, stream);
+        if(dd < 0.0){
+          float xs = (pc.x - dx) / (dd < bulb ? wdt : 0.11);
+          vec3 dc = vec3(0.9, 0.48, 0.05) * (0.7 + 0.5 * lightK);
+          dc += vec3(1.0, 0.95, 0.8) * smoothstep(0.45, 0.0, abs(xs + 0.35)) * 0.8;
+          col = mix(col, dc, smoothstep(0.0, -0.02, dd));
+        }
+      }
+      // warm haze into the distance
+      col = mix(col, vec3(0.55, 0.3, 0.07), smoothstep(2.4, 6.5, t) * 0.65);
+      return col;
+    }
+
+    // ---- bees ----
+    vec2 beePos(float fi, float tt){
+      float h1 = hash(vec2(fi, 1.0)), h2 = hash(vec2(fi, 2.0));
+      vec2 c = vec2(ASP * (0.5 + 0.42 * sin(tt * (0.13 + 0.08 * h1) + h2 * 6.28)),
+                    0.5 + 0.36 * sin(tt * (0.2 + 0.1 * h2) + h1 * 6.28));
+      c += 0.025 * vec2(sin(tt * 3.1 + fi * 1.7), cos(tt * 2.6 + fi * 2.3));
+      vec2 cp = vec2(u_light.x * ASP, u_light.y);
+      vec2 orb = cp + (0.09 + 0.05 * h1) * vec2(cos(tt * (1.4 + h2) + fi * 2.0), 0.6 * sin(tt * (1.4 + h2) + fi * 2.0));
+      c = mix(c, orb, u_ptrOn * step(0.45, hash(vec2(fi, 20.0))));
+      float age = tt - u_burst.z;
+      if(age > 0.0 && age < 4.0){
+        vec2 bc = vec2(u_burst.x * ASP, u_burst.y);
+        vec2 dv = c - bc;
+        c += dv / (length(dv) + 0.05) * 0.3 * (1.0 - exp(-age * 4.0)) * exp(-age * 0.9);
+      }
+      return c;
+    }
+    vec4 bee(vec2 p, vec2 pos, float ang, float sz, float fi, float blur){
+      vec2 b = rot(p - pos, -ang) / sz;
+      if(dot(b, b) > 6.0) return vec4(0.0);
+      float aa = 1.6 / (u_res.y * sz) + blur;
+      vec2 Ll2 = rot(vec2(0.35, 0.6), -ang);
+      vec3 Ll = normalize(vec3(Ll2, 0.75));
+      float fz = (noise(b * 14.0 + fi * 7.0) - 0.5) * 0.09;
+      // abdomen with stripes
+      vec2 ab = (b - vec2(-0.6, 0.0)) / vec2(0.82, 0.56);
+      float abd = (length(ab) - 1.0) * 0.56;
+      vec3 Na = normalize(vec3(ab, sqrt(max(0.0, 1.0 - dot(ab, ab)))));
+      float stripe = smoothstep(-0.25, 0.25, sin((b.x + 0.6) * 7.5 + 0.8));
+      vec3 c = mix(vec3(0.05, 0.035, 0.02), vec3(1.0, 0.74, 0.12), stripe * step(-1.25, b.x));
+      float sh = 0.3 + 0.8 * max(dot(Na, Ll), 0.0);
+      c = c * sh + vec3(1.0, 0.95, 0.8) * pow(max(dot(reflect(-Ll, Na), vec3(0.0, 0.0, 1.0)), 0.0), 18.0) * 0.4;
+      // pollen baskets on the legs
+      float pb = min(length(b - vec2(-0.05, 0.42)), length(b - vec2(-0.05, -0.42))) - 0.14;
+      // thorax, fuzzy
+      vec2 tq = (b - vec2(0.3, 0.0)) / 0.42;
+      float thd = (length(tq) - 1.0) * 0.42 + fz;
+      vec3 Nt = normalize(vec3(tq, sqrt(max(0.0, 1.0 - dot(tq, tq)))));
+      vec3 tc = vec3(0.62, 0.36, 0.09) * (0.35 + 0.8 * max(dot(Nt, Ll), 0.0)) * (0.85 + 0.3 * noise(b * 30.0));
+      // head
+      vec2 hq = (b - vec2(0.88, 0.0)) / 0.3;
+      float hdd = (length(hq) - 1.0) * 0.3;
+      vec3 Nh = normalize(vec3(hq, sqrt(max(0.0, 1.0 - dot(hq, hq)))));
+      vec3 hcc = vec3(0.07, 0.05, 0.03) * (0.5 + 0.8 * max(dot(Nh, Ll), 0.0)) + vec3(0.9) * pow(max(dot(reflect(-Ll, Nh), vec3(0.0, 0.0, 1.0)), 0.0), 30.0) * 0.6;
+      float body = min(min(abd + fz * 0.5, thd), hdd);
+      body = min(body, pb);
+      float m = smoothstep(aa, -aa, body);
+      vec3 col = c;
+      col = mix(col, vec3(1.0, 0.8, 0.2) * (0.6 + 0.6 * max(Ll.y, 0.0)), smoothstep(aa, -aa, pb));
+      col = mix(col, tc, smoothstep(aa, -aa, thd));
+      col = mix(col, hcc, smoothstep(aa, -aa, hdd));
+      // antennae
+      float ant = min(length(b - vec2(1.25, 0.18)) - 0.05, length(b - vec2(1.25, -0.18)) - 0.05);
+      m = max(m, smoothstep(aa, -aa, ant));
+      // wings, flickering
+      float wa = 0.0; vec3 wc = vec3(0.0);
+      for(int s = 0; s < 2; s++){
+        float sg = s == 0 ? 1.0 : -1.0;
+        float flap = 0.35 + 0.55 * abs(sin(T * 48.0 + fi * 1.3));
+        vec2 wq = rot(b - vec2(0.15, 0.25 * sg), sg * (0.5 + 0.35 * sin(T * 48.0 + fi)));
+        wq -= vec2(-0.25, 0.55 * sg * flap);
+        float wd = (length(wq / vec2(0.75, 0.36 * flap + 0.06)) - 1.0) * 0.3;
+        float wm = smoothstep(aa, -aa, wd);
+        float edge = smoothstep(0.05, 0.0, abs(wd));
+        float vein = smoothstep(0.03, 0.0, abs(wq.y * 1.2 - wq.x * 0.25 * sg)) * wm;
+        wa = max(wa, wm * 0.38 + edge * 0.25 * wm);
+        wc = vec3(0.85, 0.93, 1.0) + vec3(1.0) * (edge + vein) * 0.4;
+      }
+      col = mix(col, wc, wa * (1.0 - 0.0 * m));
+      float alpha = max(m, wa);
+      if(m < 0.01 && wa > 0.0) col = wc;
+      return vec4(col, alpha);
+    }
+
     void main(){
       vec2 uv = gl_FragCoord.xy / u_res;
       ASP = u_res.x / u_res.y;
+      T = u_time;
       vec2 p = vec2(uv.x * ASP, uv.y);
-      float t = u_time;
+      float tdep;
+      vec3 col = comb(uv, tdep);
       vec2 lp = vec2(u_light.x * ASP, u_light.y);
-      // the comb, slightly in perspective
-      vec2 cp = p * 6.5 + vec2(0.0, t * 0.01);
-      cp.x *= 1.0 + 0.08 * (uv.y - 0.5);
-      vec4 hc = hexCell(cp);
-      vec2 q = hc.xy; vec2 id = hc.zw;
-      float hd = hexDist(q);
-      float h = hash(id);
-      float wall = smoothstep(0.44, 0.5, hd);
-      float inner = smoothstep(0.5, 0.0, hd);
-      // cell interior: honey (most), wax caps (some), a few empty and dark
-      vec3 wax = vec3(0.85, 0.6, 0.22);
-      vec3 col;
-      vec2 toL = lp - p;
-      float ldist = length(toL);
-      float lightK = 0.5 + 0.6 * exp(-ldist * 1.8);
-      if(h < 0.62){
-        // honey: deep amber, darker at the rim, a meniscus that catches the light
-        vec3 honey = mix(vec3(0.55, 0.22, 0.02), vec3(1.0, 0.66, 0.12), inner);
-        vec2 n = q * 1.6;
-        vec3 N = normalize(vec3(n, 1.0));
-        vec3 Ld = normalize(vec3(toL * 2.0, 0.6));
-        float spe = pow(max(dot(reflect(-Ld, N), vec3(0.0, 0.0, 1.0)), 0.0), 40.0);
-        col = honey * lightK + vec3(1.0, 0.95, 0.8) * spe * (0.8 + exp(-ldist * 2.0));
-        col += vec3(1.0, 0.7, 0.2) * smoothstep(0.38, 0.47, hd) * 0.25;
-      } else if(h < 0.88){
-        // capped with wax, a soft dome
-        float dome = sqrt(max(0.0, 1.0 - hd * hd * 4.2));
-        col = mix(vec3(0.66, 0.48, 0.22), vec3(0.88, 0.72, 0.42), dome) * (0.6 + 0.4 * dot(normalize(vec3(q, dome)), normalize(vec3(toL, 0.6)))) * lightK;
-        col *= 0.92 + 0.08 * noise(q * 30.0 + id);
-      } else {
-        col = mix(vec3(0.12, 0.06, 0.02), vec3(0.3, 0.17, 0.06), smoothstep(0.5, 0.2, hd)) * lightK;
+      // sunlight pouring in from the hive mouth, upper right
+      vec2 SUN = vec2(ASP * 1.05, 1.15);
+      vec2 sv = p - SUN; float sd = length(sv);
+      vec2 dir = sv / (sd + 1e-4);
+      float rays = pow(noise(dir * 7.0 + vec2(T * 0.07, 0.0)), 2.5);
+      col += GOLD * rays * exp(-sd * 0.9) * 0.4;
+      col += GOLD * exp(-sd * 1.6) * 0.3;
+      // bees: far to near, each with a soft shadow on the comb
+      for(int i = 0; i < 7; i++){
+        float fi = float(i);
+        float z = 0.55 + fi * 0.12;
+        float sz = 0.036 * z;
+        vec2 pos = beePos(fi, T);
+        vec2 v = pos - beePos(fi, T - 0.06);
+        float ang = atan(v.y, v.x + 1e-5);
+        vec2 sp = p - (pos + vec2(0.025, -0.045) * z);
+        col *= 1.0 - 0.32 * exp(-dot(sp, sp) / (sz * sz * 2.2));
+        vec4 bc = bee(p, pos, ang, sz, fi, fi > 5.5 ? 0.12 : 0.0);
+        col = mix(col, bc.rgb, bc.a);
       }
-      // the wax walls with a lit edge on the side toward the light
-      vec3 wallC = wax * (0.8 + 0.4 * dot(normalize(q + 0.001), normalize(toL + 0.001))) * lightK;
-      col = mix(col, wallC, wall);
-      col *= 1.0 - 0.25 * smoothstep(0.3, 0.46, hd) * (1.0 - wall);
-      // warm back-light haze and slanting rays
-      col += vec3(1.0, 0.7, 0.25) * exp(-ldist * 2.4) * 0.25;
-      float rays = smoothstep(0.55, 1.0, noise(vec2((p.x + p.y * 0.6) * 6.0, t * 0.05))) * 0.15;
-      col += vec3(1.0, 0.8, 0.4) * rays;
-      // pollen in the air, two depths, the near ones blurred into bokeh
-      for(int L = 0; L < 2; L++){
+      // pollen dust: far specks, drifting grains, near blurred motes
+      for(int L = 0; L < 3; L++){
         float fl = float(L);
-        float S = fl < 0.5 ? 7.0 : 18.0;
-        vec2 gp = (p + vec2(t * (0.01 + fl * 0.02), sin(t * 0.2 + fl) * 0.02)) * S;
+        float S = fl < 0.5 ? 24.0 : fl < 1.5 ? 11.0 : 4.5;
+        vec2 gp = (p + vec2(T * (0.008 + fl * 0.012), -T * (0.006 + fl * 0.006) + sin(T * 0.2 + fl) * 0.02)) * S;
         vec2 gid = floor(gp); vec2 gf = fract(gp) - 0.5;
         float gh = hash(gid + fl * 31.0);
-        if(gh > (fl < 0.5 ? 0.82 : 0.7)){
-          vec2 o = (vec2(hash(gid + 1.0), hash(gid + 2.0)) - 0.5) * 0.6 + 0.08 * vec2(sin(t + gh * 20.0), cos(t * 0.8 + gh * 10.0));
+        if(gh > (fl < 0.5 ? 0.62 : fl < 1.5 ? 0.78 : 0.86)){
+          vec2 o = (vec2(hash(gid + 1.0), hash(gid + 2.0)) - 0.5) * 0.6 + 0.08 * vec2(sin(T + gh * 20.0), cos(T * 0.8 + gh * 10.0));
           float r = length(gf - o);
-          float m = fl < 0.5 ? smoothstep(0.22, 0.12, r) * 0.45 : smoothstep(0.09, 0.03, r);
-          col += vec3(1.0, 0.85, 0.35) * m * (0.5 + 0.5 * exp(-length(p - lp) * 1.5));
+          float m = fl < 0.5 ? smoothstep(0.08, 0.0, r) : fl < 1.5 ? smoothstep(0.07, 0.02, r) : smoothstep(0.26, 0.18, r) * 0.22;
+          float tw = fl < 0.5 ? 0.5 + 0.5 * sin(T * 4.0 + gh * 50.0) : 1.0;
+          col += vec3(1.0, 0.85, 0.42) * m * tw * (0.5 + 0.6 * exp(-length(p - lp) * 1.5));
         }
       }
-      // the burst: a ring of grains thrown out from the click
-      float age = t - u_burst.z;
+      // click: a puff of pollen
+      float age = T - u_burst.z;
       if(age > 0.0 && age < 3.0){
-        vec2 bp = p - vec2(u_burst.x * ASP, u_burst.y);
-        float br = length(bp), ba = atan(bp.y, bp.x);
-        float grains = step(0.6, hash(vec2(floor(ba * 14.0), 3.0))) * smoothstep(0.02, 0.0, abs(br - age * 0.25 * (0.7 + 0.6 * hash(vec2(floor(ba * 14.0), 7.0)))));
-        col += vec3(1.0, 0.85, 0.3) * (grains * 1.2 + exp(-br * 12.0) * 0.6) * exp(-age * 1.2);
+        vec2 bc = vec2(u_burst.x * ASP, u_burst.y);
+        for(int i = 0; i < 28; i++){
+          float fi = float(i);
+          float an = fi * 2.399 + u_burst.z;
+          float spd = 0.15 + 0.3 * hash(vec2(fi, u_burst.z));
+          vec2 pp = bc + vec2(cos(an), sin(an)) * spd * (1.0 - exp(-age * 2.0)) * 1.2 + vec2(0.0, age * 0.03);
+          float s2 = 0.004 + 0.006 * hash(vec2(fi, 9.0));
+          col += GOLD * smoothstep(s2, 0.0, length(p - pp) - s2 * 0.5) * (1.0 - age / 3.0) * 1.5;
+        }
+        col += GOLD * exp(-length(p - bc) * 7.0) * exp(-age * 3.0) * 0.5;
       }
-      vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * 0.9;
+      col = col / (1.0 + col * 0.18);
+      vec2 vg = uv - 0.5; col *= 1.0 - dot(vg, vg) * 0.85;
       gl_FragColor = vec4(col, 1.0);
     }
   `;
   const lightP = { x: 0.7, y: 0.7 }; const burst = [0.5, 0.5, -100]; let layerRef = null;
+  let ptrOn = 0;
   layerRef = v2Bespoke(id, FRAG, {
-    scale: 0.55,
+    scale: 0.75,
     mat: { bg0:'#2a1404', acc:'#ffc94a' }, spin: ['linear-gradient(180deg,#ffd86a,#f0a020 55%,#b06a08)', '#2a1404'],
     frame: (gl, U, t, dt, st)=>{
-      const on = st && performance.now() - st.moved < 5000;
+      const on = st && performance.now() - st.moved < 4000;
+      ptrOn = ease(ptrOn, on ? 1 : 0, 0.6, dt);
       const tx = on ? st.x / window.innerWidth : 0.55 + 0.3 * Math.cos(t * 0.15);
       const ty = on ? 1 - st.y / window.innerHeight : 0.65 + 0.15 * Math.sin(t * 0.2);
       lightP.x = ease(lightP.x, tx, 0.15, dt); lightP.y = ease(lightP.y, ty, 0.15, dt);
       gl.uniform2f(U('u_light'), lightP.x, lightP.y);
       gl.uniform3f(U('u_burst'), burst[0], burst[1], burst[2]);
+      gl.uniform1f(U('u_ptrOn'), ptrOn);
     },
     down: (e)=>{ const u = uvOf(e); burst[0] = u[0]; burst[1] = u[1]; burst[2] = layerRef ? layerRef.now() : 0; }
   });
@@ -9870,6 +10793,355 @@ V2_SHADERS.crystal = function(id){
 };
 
 
+// ------------------------------------------------------------
+// ELECTRICITY : OVERLOAD — the heir of ELECTRICITY. A slow night flight along a
+// high-voltage line over a flooded plain in a thunderstorm. Lattice pylons march
+// to the horizon, current runs along the wires in pulses, the insulators wear
+// blue coronas, and the whole sky mirrors in the water, broken by rain rings.
+// Up in the cloud deck the old ELECTRICITY lightning still crawls sideways; now
+// and then a strike comes down and lights everything, and the thunder follows.
+// Hold the mouse to grow a ball of lightning; release for the OVERLOAD: a strike
+// into the pylon nearest the cursor and a surge racing down the line, every
+// insulator flashing as it passes. Every spin sends a small surge.
+// ------------------------------------------------------------
+V2_SHADERS.electricity_overload = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
+    uniform vec2 u_res; uniform float u_time;
+    uniform vec4 u_cam;             // camera x, height, z (distance flown), horizon line
+    uniform vec2 u_lx;              // x of the near and the far line
+    uniform vec4 u_b0, u_b0p, u_b1, u_b1p;   // strikes: (x, z, seed, birth) and (bottom height, power, amplitude, -)
+    uniform vec4 u_surge;           // origin z, birth, line x, power
+    uniform float u_charge; uniform vec3 u_ball;
+    const float F = 1.6;
+    const float D = 16.0;
+    float CX, CZ, HZ, T, PX, FLASH, FX;
+    vec3 HAZE;
+
+    float sdSeg(vec2 p, vec2 a, vec2 b){ vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h); }
+    // an antialiased line of true width w (screen units); thinner than a pixel it fades instead of crawling
+    float aaLine(float d, float w, float px){ float ww = max(w, px * 0.6); return smoothstep(ww + px, ww, d) * min(1.0, w / (px * 0.6)); }
+
+    // a lattice pylon in its own plane (world units, ground at 0): coverage
+    float pylon(vec2 q, float px){
+      float d = 1e3;
+      vec2 L0 = vec2(-1.7, 0.0), L1 = vec2(-0.45, 8.4), R0 = vec2(1.7, 0.0), R1 = vec2(0.45, 8.4), TOP = vec2(0.0, 9.6);
+      d = min(d, sdSeg(q, L0, L1) - 0.09);
+      d = min(d, sdSeg(q, R0, R1) - 0.09);
+      d = min(d, sdSeg(q, L1, TOP) - 0.055);
+      d = min(d, sdSeg(q, R1, TOP) - 0.055);
+      if(q.y > 0.0 && q.y < 8.4){
+        float bh = 1.05;
+        float y0 = floor(q.y / bh) * bh, y1 = min(y0 + bh, 8.4);
+        float w0 = mix(1.7, 0.45, y0 / 8.4), w1 = mix(1.7, 0.45, y1 / 8.4);
+        d = min(d, sdSeg(q, vec2(-w0, y0), vec2(w1, y1)) - 0.032);
+        d = min(d, sdSeg(q, vec2(w0, y0), vec2(-w1, y1)) - 0.032);
+        d = min(d, max(abs(q.y - y0) - 0.03, abs(q.x) - w0));
+      }
+      // cross-arms (little trusses) and the insulator strings under their tips
+      d = min(d, sdSeg(q, vec2(-3.1, 6.6), vec2(3.1, 6.6)) - 0.07);
+      d = min(d, sdSeg(q, vec2(-3.1, 6.6), vec2(-0.62, 6.0)) - 0.045);
+      d = min(d, sdSeg(q, vec2(3.1, 6.6), vec2(0.62, 6.0)) - 0.045);
+      d = min(d, sdSeg(q, vec2(-2.4, 8.1), vec2(2.4, 8.1)) - 0.06);
+      d = min(d, sdSeg(q, vec2(-2.4, 8.1), vec2(-0.47, 7.6)) - 0.04);
+      d = min(d, sdSeg(q, vec2(2.4, 8.1), vec2(0.47, 7.6)) - 0.04);
+      d = min(d, sdSeg(q, vec2(-3.0, 6.6), vec2(-3.0, 5.85)) - 0.075);
+      d = min(d, sdSeg(q, vec2(3.0, 6.6), vec2(3.0, 5.85)) - 0.075);
+      d = min(d, sdSeg(q, vec2(-2.3, 8.1), vec2(-2.3, 7.35)) - 0.075);
+      d = min(d, sdSeg(q, vec2(2.3, 8.1), vec2(2.3, 7.35)) - 0.075);
+      return smoothstep(px, -px, d);
+    }
+
+    float flashOf(vec4 b, vec4 bp){
+      float age = T - b.w;
+      if(age < 0.0 || age > 1.4) return 0.0;
+      return exp(-age * 3.2) * (0.45 + 0.55 * step(0.42, fract(age * 11.0 + b.z))) * bp.y;
+    }
+    // a strike in world space; its shape is fixed for the strike's whole life
+    float bolt(vec2 p, float cy, vec4 b, vec4 bp){
+      float fl = flashOf(b, bp);
+      if(fl <= 0.0) return 0.0;
+      float Z = b.y - CZ;
+      if(Z < 2.0) return 0.0;
+      float hw = (p.y - HZ) * Z / F + cy;
+      float k = hw - bp.x;
+      if(k < -0.6) return 0.0;
+      float off = 0.0, amp = bp.z, fq = 0.05;
+      for(int i = 0; i < 5; i++){ off += amp * (noise(vec2(k * fq + b.z * 13.1, b.z * 7.3 + float(i) * 3.1)) - 0.5); amp *= 0.5; fq *= 2.3; }
+      off *= smoothstep(0.0, 5.0, k);
+      float xw = p.x * Z / F + CX;
+      float d = abs(xw - (b.x + off)) * F / Z;
+      float g = 0.0018 / (d + 0.0012) + exp(-d * 60.0) * 0.8 + exp(-d * 9.0) * 0.12;
+      float kb0 = 16.0 + 18.0 * fract(b.z * 3.7);
+      if(k > kb0 - 13.0 && k < kb0){
+        float kb = kb0 - k;
+        float side = fract(b.z * 9.1) > 0.5 ? 1.0 : -1.0;
+        float xb = b.x + off + side * kb * 0.6 + 1.4 * (noise(vec2(kb * 0.35, b.z * 5.0)) - 0.5);
+        g += 0.0006 / (abs(xw - xb) * F / Z + 0.001) * (1.0 - kb / 13.0);
+      }
+      return g * smoothstep(-0.6, 0.3, k) * fl;
+    }
+
+    // the storm sky over the plain
+    vec3 sky(vec2 p){
+      float v = p.y - HZ;
+      vec3 rd = normalize(vec3(p.x, v, F));
+      vec3 c = mix(vec3(0.03, 0.065, 0.1), vec3(0.005, 0.012, 0.028), clamp(rd.y * 2.4, 0.0, 1.0));
+      // the old ELECTRICITY: lightning crawling sideways through the cloud deck
+      float slot = floor(T / 2.6), ph = fract(T / 2.6);
+      float on = step(0.45, hash(vec2(slot, 3.0)));
+      float grow = smoothstep(0.0, 0.12, ph);
+      float life = on * smoothstep(0.42, 0.14, ph) * (0.55 + 0.45 * step(0.5, fract(ph * 19.0)));
+      float x0 = (hash(vec2(slot, 5.0)) - 0.5) * 1.6, len = 0.5 + 0.6 * hash(vec2(slot, 6.0));
+      float dir = hash(vec2(slot, 8.0)) > 0.5 ? 1.0 : -1.0;
+      float along = (p.x - x0) * dir;
+      float spider = 0.0;
+      if(life > 0.0 && along > 0.0 && along < len * grow){
+        float ya = 0.22 + 0.22 * hash(vec2(slot, 7.0)) + (fbm3(vec2(p.x * 3.0, slot)) - 0.5) * 0.1 + (noise(vec2(p.x * 30.0, slot)) - 0.5) * 0.014;
+        float d = abs(v - ya);
+        spider = (0.0008 / (d + 0.0008) + exp(-d * 45.0) * 0.35) * life * smoothstep(len * grow, len * grow - 0.04, along);
+      }
+      float sLight = life * exp(-abs(p.x - (x0 + dir * len * 0.5)) * 2.2);
+      // clouds: a heavy deck, lit from below and from inside by the lightning
+      vec2 cq = vec2(rd.x / max(rd.y, 0.04) * 0.6 + T * 0.025, 0.3 / max(rd.y, 0.04) + CZ * 0.006);
+      float cl = fbm(cq + 0.5 * fbm3(cq * 1.7 - T * 0.04));
+      float cUnder = clamp((cl - fbm(cq + vec2(0.0, 0.1))) * 5.0 + 0.5, 0.0, 1.0);
+      vec3 cc = mix(vec3(0.018, 0.035, 0.06), vec3(0.07, 0.12, 0.19), cUnder);
+      cc += vec3(0.45, 0.65, 1.0) * (FLASH * (0.25 + 0.75 * exp(-abs(p.x - FX) * 1.4)) + sLight * 0.7) * (0.35 + cl) * (0.45 + cUnder);
+      c = mix(c, cc, smoothstep(0.3, 0.75, cl) * smoothstep(-0.01, 0.08, rd.y));
+      c += vec3(0.2, 0.35, 0.6) * FLASH * 0.18;
+      c += vec3(0.75, 0.9, 1.0) * spider;
+      c += vec3(0.05, 0.12, 0.2) * exp(-abs(v) * 22.0) * 0.55;
+      // a far treeline and the city the line runs to
+      float tl = 0.004 + 0.012 * fbm3(vec2(p.x * 7.0, 3.0)) * smoothstep(0.05, 0.4, abs(p.x + 0.05));
+      if(v < tl){
+        c = mix(c, vec3(0.006, 0.014, 0.024) + vec3(0.15, 0.25, 0.4) * FLASH * 0.2, smoothstep(tl, tl - 0.002, v));
+        float lights = step(0.86, hash(vec2(floor(p.x * 260.0), 1.0))) * smoothstep(0.35, 0.0, abs(p.x)) * step(v, tl * 0.7);
+        c += vec3(0.5, 0.8, 1.0) * lights * (0.5 + 0.5 * sin(T * 2.0 + floor(p.x * 260.0))) * 0.5;
+      }
+      c += vec3(0.1, 0.3, 0.55) * exp(-length(vec2(p.x * 0.7, v * 4.0)) * 6.0) * 0.25;
+      return c;
+    }
+
+    // one power line: pylons far to near, then its wires
+    vec3 drawLine(vec3 col, vec2 p, float cy, float X, float li){
+      float v = p.y - HZ;
+      float k0 = floor(CZ / D) + 1.0;
+      float sAge = T - u_surge.y;
+      bool surged = abs(u_surge.z - X) < 0.1 && sAge >= 0.0 && sAge < 6.0;
+      float f1 = u_surge.x + sAge * 42.0, f2 = u_surge.x - sAge * 42.0;
+      float sPow = u_surge.w * exp(-sAge * 0.45);
+      vec3 glow = vec3(0.0);
+      for(int i = 13; i >= 0; i--){
+        float zk = (k0 + float(i)) * D;
+        float Z = zk - CZ;
+        if(Z < 1.5) continue;
+        float s = F / Z;
+        vec2 q = vec2((p.x - (X - CX) * s) / s, v / s + cy);
+        float pxw = PX / s;
+        float fog = 1.0 - exp(-Z * 0.011);
+        if(abs(q.x) < 3.4 + pxw * 2.0 && q.y > -0.4 && q.y < 10.0){
+          float cov = pylon(q, pxw);
+          vec3 pc = vec3(0.007, 0.011, 0.02) + vec3(0.25, 0.4, 0.65) * FLASH * 0.12;
+          col = mix(col, mix(pc, HAZE, fog), cov);
+        }
+        // blue coronas on the insulators, a beacon on top
+        float sf = surged ? (exp(-abs(zk - f1) * 0.09) + exp(-abs(zk - f2) * 0.09)) * sPow * 4.0 : 0.0;
+        float fl = (0.35 + 0.25 * hash(vec2(zk, floor(T * 12.0)))) * (1.0 + u_charge * 2.0) + sf;
+        float dd = min(min(length(q - vec2(-3.0, 5.8)), length(q - vec2(3.0, 5.8))), min(length(q - vec2(-2.3, 7.3)), length(q - vec2(2.3, 7.3)))) * s;
+        glow += vec3(0.3, 0.75, 1.0) * (0.0025 / (dd + 0.0025) * 0.35 + exp(-dd * 120.0) * 0.4) * fl * (1.0 - fog);
+        float bd = length(q - vec2(0.0, 9.75)) * s;
+        float blink = step(0.82, fract(T * 0.55 + li * 0.37));
+        glow += vec3(0.6, 0.9, 1.0) * (0.0015 / (bd + 0.0015)) * (0.15 + blink) * (1.0 - fog * 0.7);
+      }
+      // the wires: for this pixel's column, each wire has one point at one depth
+      for(int w = 0; w < 5; w++){
+        float ax = w == 0 ? -3.0 : (w == 1 ? 3.0 : (w == 2 ? -2.3 : (w == 3 ? 2.3 : 0.0)));
+        float ay = w < 2 ? 5.8 : (w < 4 ? 7.3 : 9.6);
+        float sagA = w == 4 ? 1.0 : 1.8;
+        float rel = X + ax - CX;
+        if(p.x * rel <= 0.0) continue;
+        float Z = rel * F / p.x;
+        if(Z < 1.2 || Z > 240.0) continue;
+        float zw = Z + CZ;
+        float u = fract(zw / D);
+        float ys = (ay - sagA * 4.0 * u * (1.0 - u) - cy) * F / Z;
+        float p2 = p.x * 1.004;
+        float Z2 = rel * F / p2; float u2 = fract((Z2 + CZ) / D);
+        float ys2 = (ay - sagA * 4.0 * u2 * (1.0 - u2) - cy) * F / Z2;
+        float slope = clamp((ys2 - ys) / (p2 - p.x), -600.0, 600.0);
+        float d = abs(v - ys) / sqrt(1.0 + slope * slope);
+        float s = F / Z;
+        float fog = 1.0 - exp(-Z * 0.011);
+        float cov = aaLine(d, (w == 4 ? 0.025 : 0.04) * s, PX);
+        col = mix(col, mix(vec3(0.01, 0.016, 0.028), HAZE, fog), cov * 0.95);
+        float pulse = pow(0.5 + 0.5 * sin(zw * 0.2 - T * 6.0 + float(w) * 1.9 + li * 2.3), 28.0);
+        float cur = (0.12 + pulse * (0.9 + 2.0 * u_charge)) * (w == 4 ? 0.25 : 1.0);
+        if(surged){
+          cur += (exp(-abs(zw - f1) * 0.08) + exp(-abs(zw - f2) * 0.08)) * sPow * 6.0;
+          cur += step(f2, zw) * step(zw, f1) * sPow * 0.6;
+        }
+        float halo = exp(-d / (0.003 + 0.05 * s));
+        glow += vec3(0.25, 0.7, 1.0) * (cov * cur * 1.3 + halo * cur * 0.22) * (1.0 - fog);
+      }
+      return col + glow;
+    }
+
+    vec3 scene(vec2 p, float cy){
+      vec3 col = sky(p);
+      col = drawLine(col, p, cy, u_lx.y, 1.0);
+      col = drawLine(col, p, cy, u_lx.x, 0.0);
+      col += vec3(0.8, 0.92, 1.0) * (bolt(p, cy, u_b0, u_b0p) + bolt(p, cy, u_b1, u_b1p)) * 1.3;
+      return col;
+    }
+
+    void main(){
+      T = u_time; CX = u_cam.x; CZ = u_cam.z; HZ = u_cam.w; PX = 1.0 / u_res.y;
+      vec2 p = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
+      float fa = flashOf(u_b0, u_b0p), fb = flashOf(u_b1, u_b1p);
+      FLASH = fa + fb;
+      FX = fa > fb ? (u_b0.x - CX) / max(u_b0.y - CZ, 1.0) * F : (u_b1.x - CX) / max(u_b1.y - CZ, 1.0) * F;
+      HAZE = vec3(0.025, 0.055, 0.09) + vec3(0.15, 0.25, 0.4) * FLASH * 0.5;
+      float v = p.y - HZ;
+      vec3 col;
+      if(v >= 0.0){
+        col = scene(p, u_cam.y);
+      } else {
+        // flooded plain: a dark mirror, broken by rain rings and the wind
+        float Zw = u_cam.y * F / -v;
+        vec2 wp = vec2(p.x * Zw / F + CX, Zw + CZ);
+        vec2 g = wp * 1.3; vec2 gi = floor(g); vec2 gf = fract(g) - 0.5;
+        float ph = fract(T * 0.85 + hash(gi) * 7.0);
+        vec2 o = (vec2(hash(gi + 1.3), hash(gi + 2.7)) - 0.5) * 0.5;
+        float r = length(gf - o);
+        float ring = sin((r - ph * 0.45) * 60.0) * exp(-pow((r - ph * 0.45) * 22.0, 2.0)) * (1.0 - ph) * exp(-Zw * 0.06);
+        float wn = (noise(wp * vec2(0.45, 1.5) + vec2(0.0, T * 0.5)) - 0.5) + 0.5 * (noise(wp * vec2(1.4, 4.2) - vec2(T * 0.3, 0.0)) - 0.5);
+        vec2 rp = vec2(p.x + wn * 0.02 * -v, HZ - v + (ring * 0.8 + wn * 0.6) * 0.09 * -v);
+        vec3 refl = scene(rp, -u_cam.y);
+        float fres = mix(0.42, 0.95, exp(v * 6.0));
+        col = vec3(0.003, 0.008, 0.015) + refl * fres;
+        col += vec3(0.3, 0.6, 1.0) * max(ring, 0.0) * 0.04 * (1.0 + FLASH * 3.0);
+      }
+      // ball lightning while charging
+      if(u_ball.z > 0.01){
+        float d = length(p - u_ball.xy);
+        float r = 0.01 + 0.022 * u_ball.z;
+        float fl = 0.8 + 0.2 * sin(T * 47.0) * sin(T * 13.0);
+        col += vec3(0.85, 0.95, 1.0) * smoothstep(r, r * 0.35, d) * fl * u_ball.z;
+        col += vec3(0.25, 0.65, 1.0) * exp(-d / (r * 1.6)) * 0.8 * u_ball.z * fl;
+        for(int i = 0; i < 4; i++){
+          float fi = float(i);
+          float a = hash(vec2(floor(T * 14.0), fi)) * 6.2831;
+          vec2 dir = vec2(cos(a), sin(a));
+          vec2 m = u_ball.xy + dir * r * 2.2 + vec2(-dir.y, dir.x) * r * (hash(vec2(fi, floor(T * 14.0) + 3.0)) - 0.5) * 2.0;
+          float dl = min(sdSeg(p, u_ball.xy, m), sdSeg(p, m, u_ball.xy + dir * r * (3.5 + u_ball.z * 2.0)));
+          col += vec3(0.6, 0.9, 1.0) * 0.0006 / (dl + 0.0008) * u_ball.z;
+        }
+      }
+      // driven rain
+      vec2 rq = vec2(p.x + p.y * 0.28, p.y * 0.04 + T * 2.4);
+      float rain = smoothstep(0.9, 1.0, noise(vec2(rq.x * 170.0, rq.y * 5.0)));
+      col += vec3(0.35, 0.5, 0.7) * rain * (0.07 + FLASH * 0.45);
+      vec2 vg = gl_FragCoord.xy / u_res - 0.5; col *= 1.0 - dot(vg, vg) * 0.85;
+      col = col / (1.0 + col * 0.55) * 1.2;
+      col += (hash(gl_FragCoord.xy + fract(T)) - 0.5) * 0.01;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+  const F = 1.6, D = 16, PYH = 9.6;
+  let camZ = 0, curOn = 0, charge = 0, holding = false, ballOn = 0, next = 2.5, slot = 0, nowT = 0;
+  let cam = [0, 2.6, 0, -0.08], lx = [5.5, -17];
+  const cur = [0, 0];
+  const bolts = [[0, -100, 0.3, -100, 0, 0, 6], [0, -100, 0.7, -100, 0, 0, 6]];   // x, z, seed, birth, bottom y, power, amplitude
+  const surge = [0, -100, 0, 0];
+  const snd = ()=> (typeof AMB !== 'undefined' && AMB.sfxVolume > 0.001) ? AMB.fx : null;
+  const strike = (x, z, yb, pw, amp)=>{ const b = bolts[slot]; b[0] = x; b[1] = z; b[2] = Math.random(); b[3] = nowT; b[4] = yb; b[5] = pw; b[6] = amp; slot = (slot + 1) % 2; };
+  const thunder = (dist, k)=>{
+    const f = snd(); if(!f) return;
+    f.noise(0.25, 'highpass', 2600, 900, 0.7, 0.05 * k, 0, 'white');
+    f.noise(3.2, 'lowpass', 420, 60, 0.7, 0.16 * k, Math.min(2.4, dist / 80), 'brown');
+    f.noise(1.6, 'lowpass', 900, 120, 0.7, 0.06 * k, Math.min(2.4, dist / 80) + 0.15, 'brown');
+  };
+  // the pylon closest to the cursor on screen
+  const pylonAt = (cx, cy)=>{
+    let best = null, bd = 1e9;
+    const k0 = Math.floor(camZ / D) + 1;
+    lx.forEach(X=>{
+      for(let i = 0; i < 14; i++){
+        const z = (k0 + i) * D, Z = z - camZ;
+        if(Z < 6) continue;
+        const sx = (X - cam[0]) / Z * F, sy = (PYH - cam[1]) / Z * F + cam[3];
+        const d = Math.hypot(sx - cx, (sy - cy) * 0.7);
+        if(d < bd){ bd = d; best = { X, z, Z }; }
+      }
+    });
+    return best;
+  };
+  const overload = (k)=>{
+    const t = pylonAt(cur[0], cur[1]);
+    if(!t) return;
+    strike(t.X, t.z, PYH, 1.0 + k * 0.6, 4 + k * 2);
+    surge[0] = t.z; surge[1] = nowT; surge[2] = t.X; surge[3] = 0.5 + k * 0.7;
+    const f = snd();
+    if(f){
+      f.noise(0.5, 'highpass', 1800, 6000, 0.7, 0.16 * k, 0, 'white');
+      f.tone(1600, 60, 0.45, 'sawtooth', 0.08 * k, 0, 3200);
+      f.tone(120, 40, 1.6, 'sawtooth', 0.07 * k, 0.05, 600);
+      for(let i = 0; i < 7; i++) f.noise(0.04, 'bandpass', 2500 + Math.random() * 5000, 3000, 5, 0.1 * k, 0.03 + i * 0.05 + Math.random() * 0.03, 'white');
+      if(k > 0.6){ f.impact(0.5 * k, 1.4); f.sub(0.6 * k); }
+    }
+    thunder(t.Z * 0.4, 0.6 + k * 0.6);
+    if(k > 0.6){ document.body.classList.add('wx-shake'); setTimeout(()=> document.body.classList.remove('wx-shake'), 500); }
+  };
+  // every spin sends a small surge down the near line
+  const onSpin = ()=>{
+    const k0 = Math.floor(camZ / D) + 1;
+    let z = (k0 + 1) * D; if(z - camZ < 10) z += D;
+    surge[0] = z; surge[1] = nowT; surge[2] = lx[0]; surge[3] = 0.3;
+    const f = snd(); if(f){ f.noise(0.08, 'bandpass', 4200, 2600, 4, 0.04, 0, 'white'); f.tone(2400, 300, 0.12, 'square', 0.015, 0, 3000); }
+  };
+  const sb = document.getElementById('spin-btn');
+  if(sb) sb.addEventListener('click', onSpin);
+  v2Bespoke(id, FRAG, {
+    scale: 0.75,
+    mat: { bg0:'#020d18', acc:'#5cd2ff' },
+    spin: ['linear-gradient(180deg,#eafaff,#5cd2ff 50%,#1a6fd8)', '#021022'],
+    frame: (gl, U, t, dt, ptr)=>{
+      dt = Math.min(dt, 0.05); nowT = t;
+      const asp = window.innerWidth / window.innerHeight;
+      const active = ptr && performance.now() - ptr.moved < 3000;
+      curOn = ease(curOn, active ? 1 : 0, 0.1, dt);
+      if(ptr){ cur[0] = (ptr.x / window.innerWidth - 0.5) * asp; cur[1] = 0.5 - ptr.y / window.innerHeight; }
+      charge = holding ? Math.min(1, charge + dt * 0.6) : ease(charge, 0, 0.02, dt);
+      ballOn = holding ? charge : ease(ballOn, 0, 0.0005, dt);
+      camZ += dt * 2.2;
+      lx = asp < 1 ? [5.5, -14] : [9.0, -21];
+      cam = [Math.sin(t * 0.13) * 0.5 + curOn * cur[0] * 0.4, 3.4 + Math.sin(t * 0.21) * 0.15 + curOn * cur[1] * 0.4, camZ, -0.06];
+      if(t > next){
+        const z = camZ + 70 + Math.random() * 120;
+        strike((Math.random() - 0.5) * 110, z, 0, 0.7 + Math.random() * 0.5, 6 + Math.random() * 4);
+        thunder(z - camZ, 0.7);
+        next = t + 3.5 + Math.random() * 6;
+      }
+      gl.uniform4f(U('u_cam'), cam[0], cam[1], cam[2], cam[3]);
+      gl.uniform2f(U('u_lx'), lx[0], lx[1]);
+      gl.uniform4f(U('u_b0'), bolts[0][0], bolts[0][1], bolts[0][2], bolts[0][3]);
+      gl.uniform4f(U('u_b0p'), bolts[0][4], bolts[0][5], bolts[0][6], 0);
+      gl.uniform4f(U('u_b1'), bolts[1][0], bolts[1][1], bolts[1][2], bolts[1][3]);
+      gl.uniform4f(U('u_b1p'), bolts[1][4], bolts[1][5], bolts[1][6], 0);
+      gl.uniform4f(U('u_surge'), surge[0], surge[1], surge[2], surge[3]);
+      gl.uniform1f(U('u_charge'), charge);
+      gl.uniform3f(U('u_ball'), cur[0], cur[1], ballOn);
+      if(holding && t - (window._ovCrackle || 0) > 0.12 - charge * 0.07){
+        window._ovCrackle = t;
+        const f = snd(); if(f) f.noise(0.05, 'bandpass', 1500 + charge * 5000 + Math.random() * 1500, 2000, 4, 0.03 + charge * 0.05, 0, 'white');
+      }
+    },
+    down: ()=>{ holding = true; const f = snd(); if(f) f.riser(1.6, 0.05); },
+    up: ()=>{ holding = false; overload(0.45 + charge * 0.75); charge = 0; },
+    teardown: ()=>{ if(sb) sb.removeEventListener('click', onSpin); window._ovCrackle = 0; }
+  });
+};
+
 // ==========================================================================
 // WEATHER INTROS — a short entrance whenever the weather turns.
 //   Дождь / Ветреная / Снежная : light touches and a small card under the
@@ -9901,7 +11173,7 @@ function weatherIntro(w){
     let fired = false;
     const once = ()=>{ if(fired) return; fired = true; setTimeout(go, 400); };
     window.addEventListener('dropfx-end', once, { once:true });
-    setTimeout(once, 9000);
+    setTimeout(once, window._cinePlaying ? 26000 : 9000);
   } else go();
 }
 function wxLayer(cls, life){
@@ -10241,6 +11513,90 @@ V2_SHADERS.hypnosis = function(id){
       gl.uniform1f(U('u_snap'), snapAt < 0 ? -1 : t - snapAt);
     },
     down: (e, s, layer)=>{ snapAt = layer.now(); twistDir = -twistDir; burst = 7; phiV += 9; }
+  });
+};
+
+// ------------------------------------------------------------
+// КРОВАВАЯ ЛУНА — a huge red moon hangs over a black lake and beats like a
+// heart; dead trees line the far shore, red mist creeps over the water and
+// the whole sky is mirrored in it. The cursor parts the clouds in front of
+// the moon; a click is a heavy heartbeat that rings out across the lake.
+// ------------------------------------------------------------
+V2_SHADERS.blood_moon = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_ptr; uniform float u_ptrOn; uniform vec3 u_beat;
+    float ASP;
+    vec3 scene(vec2 p, vec2 uv, float t, float beat, vec2 mc, float R, float wl){
+      vec3 col = mix(vec3(0.16, 0.02, 0.025), vec3(0.015, 0.0, 0.005), smoothstep(wl, 1.0, uv.y));
+      float d = length(p - mc);
+      col += vec3(0.6, 0.04, 0.03) * exp(-max(d - R, 0.0) * 6.0) * (0.35 + 0.45 * beat);
+      if(d < R + 0.004){
+        vec2 q = (p - mc) / R;
+        float surf = 0.65 + 0.5 * fbm(q * 3.5 + 2.0) - 0.25 * smoothstep(0.55, 0.75, fbm(q * 7.0));
+        float limb = sqrt(max(0.0, 1.0 - dot(q, q)));
+        vec3 mcol = vec3(0.8, 0.1, 0.06) * surf * (0.45 + 0.55 * limb) * (1.0 + 0.3 * beat);
+        col = mix(col, mcol, smoothstep(R + 0.004, R, d));
+      }
+      vec2 cp = vec2(u_ptr.x * ASP, u_ptr.y);
+      float part = 1.0 - exp(-dot(p - cp, p - cp) * 14.0) * u_ptrOn;
+      float cl = smoothstep(0.45, 0.8, fbm(vec2(p.x * 1.3 + t * 0.015, p.y * 3.2 - t * 0.004)));
+      col = mix(col, vec3(0.06, 0.005, 0.01), cl * 0.85 * part);
+      col += vec3(0.5, 0.05, 0.04) * cl * part * exp(-d * 3.0) * 0.25;
+      float ridge = wl + 0.03 + 0.04 * fbm3(vec2(p.x * 2.5, 3.0));
+      float cx = floor(p.x * 16.0); float h = hash(vec2(cx, 7.0));
+      float top = ridge + 0.04 + 0.11 * h;
+      float fx = abs(fract(p.x * 16.0) - 0.5);
+      float tree = step(uv.y, top) * step(fx, mix(0.02, 0.3, clamp((top - uv.y) / 0.14, 0.0, 1.0)) * step(0.35, h));
+      float land = max(step(uv.y, ridge), tree);
+      col = mix(col, vec3(0.012, 0.0, 0.003), land);
+      return col;
+    }
+    void main(){
+      vec2 uv = gl_FragCoord.xy / u_res;
+      ASP = u_res.x / u_res.y;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      float t = u_time;
+      float ph = mod(t, 1.7);
+      float beat = exp(-ph * 9.0) + 0.6 * step(0.28, ph) * exp(-max(ph - 0.28, 0.0) * 9.0);
+      float ca = t - u_beat.z;
+      float cb = (ca > 0.0 && ca < 3.0) ? exp(-ca * 2.5) : 0.0;
+      beat = beat + cb * 1.6;
+      float wl = 0.3;
+      vec2 mc = vec2(0.5 * ASP, 0.66);
+      float R = ASP > 1.1 ? 0.21 : 0.16;
+      vec3 col;
+      if(uv.y > wl){
+        col = scene(p, uv, t, beat, mc, R, wl);
+      } else {
+        float dep = wl - uv.y;
+        vec2 bp = vec2(u_beat.x * ASP, u_beat.y);
+        float bd = length((p - bp) * vec2(1.0, 3.0));
+        float wave = (ca > 0.0 && ca < 3.0) ? sin(bd * 50.0 - ca * 9.0) * exp(-abs(bd - ca * 0.45) * 12.0) * cb : 0.0;
+        float rip = sin(p.y * 160.0 / (dep + 0.05) + t * 1.5) * 0.004 + noise(vec2(p.x * 8.0, p.y * 60.0 + t * 0.5)) * 0.006 + wave * 0.02;
+        vec2 rp = vec2(p.x + rip, wl + dep * 1.0);
+        vec2 ruv = vec2(rp.x / ASP, rp.y);
+        col = scene(rp, ruv, t, beat, mc, R, wl) * vec3(0.55, 0.4, 0.42);
+        col += vec3(0.6, 0.06, 0.05) * max(wave, 0.0) * 0.5;
+        col *= 1.0 - dep * 1.4;
+      }
+      float mist = fbm(vec2(p.x * 2.2 + t * 0.03, p.y * 6.0)) * exp(-abs(uv.y - wl) * 9.0);
+      col += vec3(0.35, 0.02, 0.03) * mist * 0.6;
+      col *= 1.0 + 0.12 * cb;
+      vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * 0.9;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+  const beat = [0.5, 0.2, -100]; let ptrOn = 0;
+  v2Bespoke(id, FRAG, {
+    scale: 0.55, wm: 'BLOOD MOON', wmColor: '#e0202a',
+    mat: { bg0:'#160404', acc:'#e0202a' }, spin: ['linear-gradient(180deg,#e0303a,#8a0c14 60%,#3a0206)', '#ffe8e8'],
+    frame: (gl, U, t, dt, st)=>{
+      ptrOn = ease(ptrOn, (st && performance.now() - st.moved < 2500) ? 1 : 0, 0.15, dt);
+      gl.uniform2f(U('u_ptr'), st ? st.x / window.innerWidth : 0.5, st ? 1 - st.y / window.innerHeight : 0.6);
+      gl.uniform1f(U('u_ptrOn'), ptrOn);
+      gl.uniform3f(U('u_beat'), beat[0], beat[1], beat[2]);
+    },
+    down: (e, s, layer)=>{ const u = uvOf(e); beat[0] = u[0]; beat[1] = Math.min(u[1], 0.3); beat[2] = layer.now(); }
   });
 };
 
@@ -10640,24 +11996,30 @@ function setDropSound(cls, on){
 }
 
 const DropFX = (function(){
+  // Film-trailer grammar, not arcade: the frame closes into letterbox, the room goes dark,
+  // a thin anamorphic line of light gathers in the middle and flares across the whole
+  // screen on the hit, the title resolves out of wide-spaced letters, dust and embers
+  // drift. The sound is synthesised (a swell, a dry impact, a low brass "braam").
+  //   bars: letterbox height (vh) · dim: how dark · flash: peak of the soft flash on the hit
+  //   dust: motes drawn in before the hit · embers: slow sparks after it · rings: thin pulses
   const TIERS = {
-    normal:    { total: 3.4, hit: 2.0, gather: 0, sparks: 60, rings: 1, dim: 0.35, lock: false, sound: 'Big cinematic impact Sound Effect 4.mp3', soundAt: 0, rays: false },
-    good:      { total: 5.0, hit: 1.4, gather: 180, sparks: 140, rings: 2, dim: 0.92, lock: true, sound: 'mega-drop-impact.wav', soundAt: 1.0, rays: false, riser: 1.3 },
-    very_good: { total: 7.2, hit: 1.5, gather: 420, sparks: 260, rings: 3, dim: 1.0, lock: true, sound: 'very-good-impact.mp3', soundAt: 0.7, rays: true, riser: 1.4, heart: true }
+    normal:    { total: 3.8, hit: 1.5, bars: 7,  dim: 0.55, flash: 0.18, dust: 40,  embers: 26, rings: 0, rays: false, heart: false, braam: [0.16, 2.2, 55], impact: 0.5 },
+    good:      { total: 5.6, hit: 1.9, bars: 10, dim: 0.9,  flash: 0.32, dust: 110, embers: 60, rings: 1, rays: false, heart: false, braam: [0.26, 3.4, 49], impact: 0.8, lock: true },
+    very_good: { total: 7.6, hit: 2.4, bars: 12, dim: 1.0,  flash: 0.5,  dust: 220, embers: 110, rings: 2, rays: true, heart: true, braam: [0.34, 5.0, 41.2], impact: 1.0, lock: true }
   };
   const hexRgb = (h)=>{ const m = /^#?([0-9a-f]{6})$/i.exec(h || ''); if(!m) return [255, 215, 0]; const n = parseInt(m[1], 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
   function brighten(rgb){
     const l = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
     if(l > 0.45) return rgb;
-    const k = 0.55;
-    return rgb.map(v=> Math.round(v + (255 - v) * k));
+    return rgb.map(v=> Math.round(v + (255 - v) * 0.55));
   }
   let active = null;
 
   function play(id, name, tierKey, done, opt){
     opt = opt || {};
     const T = TIERS[tierKey] || TIERS.normal;
-    // a minimised page skips the show entirely, so auto-spin doesn't wait on frames that never come
+    // a drop with a film of its own (СУПЕРСКИЙ and above) plays the film instead of the trailer
+    if(!opt.noCine && !document.hidden && CINE[id]){ const a = Cinema.play(id, name, done, opt); if(a) return a; }
     if(document.hidden){
       if(active){ try{ active.finish(true); }catch(e){} }
       try{ window.dispatchEvent(new CustomEvent('dropfx-end')); }catch(e){}
@@ -10668,71 +12030,59 @@ const DropFX = (function(){
     if(active){ try{ active.finish(true); }catch(e){} }
     const base = brighten(hexRgb((ITEM_COLORS[id] && ITEM_COLORS[id].fg) || '#ffd700'));
     const col = (a)=> `rgba(${base[0]},${base[1]},${base[2]},${a})`;
+    const warm = (a)=> `rgba(255,${Math.round(236 + (base[1] - 236) * 0.15)},${Math.round(220 + (base[2] - 220) * 0.2)},${a})`;
 
     const ov = document.createElement('div');
     ov.id = 'dropfx';
-    ov.className = 'dfx-' + tierKey;
+    ov.className = 'dfx2 dfx-' + tierKey;
     ov.setAttribute('aria-hidden', 'true');
     ov.style.setProperty('--dfx-col', `rgb(${base.join(',')})`);
+    ov.style.setProperty('--dfx-bars', T.bars + 'vh');
     const denom = opt.denom || getNativeDenominatorForItem(ITEMS[id] || {});
+    const fmt = (n)=> Math.round(n).toLocaleString('ru-RU');
     ov.innerHTML = `<div class="dfx-dim"></div><canvas class="dfx-canvas"></canvas>
-      <div class="dfx-card"><div class="dfx-name">${styledRarityName(id, name)}</div>
-      <div class="dfx-rarity">${denom > 0 ? `1 к <span class="dfx-num">${Math.round(denom).toLocaleString('en-US')}</span>` : ''}</div>
-      <div class="dfx-class">${rarityClassBadge(id)}</div></div>`;
+      <div class="dfx-bar dfx-bar-t"></div><div class="dfx-bar dfx-bar-b"></div>
+      <div class="dfx-card">
+        <div class="dfx-name">${styledRarityName(id, name)}</div>
+        <div class="dfx-meta">${denom > 0 ? `<span class="dfx-rule"></span><span class="dfx-rarity">шанс 1 / <span class="dfx-num">${fmt(denom)}</span></span><span class="dfx-rule"></span>` : ''}</div>
+        <div class="dfx-class">${rarityClassBadge(id)}</div>
+      </div>`;
     document.body.appendChild(ov);
     const cv = ov.querySelector('.dfx-canvas');
     const ctx = cv.getContext('2d');
-    const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+    const dpr = Math.min(GFX.mode === 'ultra' ? 2 : 1.5, window.devicePixelRatio || 1);
     const W = ()=> window.innerWidth, H = ()=> window.innerHeight;
-    const fit = ()=>{ cv.width = Math.floor(W() * dpr); cv.height = Math.floor(H() * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); };
-    fit();
+    cv.width = Math.floor(W() * dpr); cv.height = Math.floor(H() * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const dim = ov.querySelector('.dfx-dim');
-    const card = ov.querySelector('.dfx-card');
-    const num = ov.querySelector('.dfx-num');
-    try{ inkFixWithin(card.querySelector('.dfx-class'), [12, 8, 22, 1], 4.5); }catch(e){}
-    try{ inkFixWithin(card.querySelector('.dfx-class'), [12, 8, 22, 1], 4.5); }catch(e){}
+    try{ inkFixWithin(ov.querySelector('.dfx-class'), [12, 8, 22, 1], 4.5); }catch(e){}
+    requestAnimationFrame(()=> ov.classList.add('dfx-in'));
 
-    // sound: the file's hit lands on T.hit
+    // sound: a swell into the hit, then a dry impact under a low brass cluster
     if(soundOn) try{
-      AMB.duck(0.2, T.total + 0.5);
-      setTimeout(()=>{ try{ AMB.playFile(T.sound, 1.0); }catch(e){} }, T.soundAt * 1000);
-      if(T.riser) AMB.fx.riser(T.riser, 0.35);
+      AMB.duck(0.15, T.total + 0.5);
+      if(T.heart){ AMB.fx.impact(0.35, 0.5); setTimeout(()=>{ try{ AMB.fx.impact(0.45, 0.55); }catch(e){} }, 620); }
+      setTimeout(()=>{ try{ AMB.fx.swell(T.heart ? T.hit - 0.9 : T.hit, 0.32); }catch(e){} }, T.heart ? 900 : 0);
+      setTimeout(()=>{ try{ AMB.fx.impact(T.impact, 1 + (T.impact - 0.5)); AMB.fx.braam(T.braam[0], T.braam[1], T.braam[2]); }catch(e){} }, T.hit * 1000);
     }catch(e){}
 
-    // particles
-    const P = [];
     const cx = ()=> W() / 2, cy = ()=> H() * 0.46;
-    const R0 = Math.max(W(), H()) * 0.6;
-    for(let i = 0; i < T.gather; i++){
+    const R0 = Math.max(W(), H()) * 0.55;
+    const P = [];
+    for(let i = 0; i < T.dust; i++){
       const a = Math.random() * Math.PI * 2;
-      const delay = Math.random() * (T.hit - 0.5);
-      P.push({ kind: 'g', a, r: R0 * (0.55 + Math.random() * 0.6), spin: (Math.random() < 0.5 ? 1 : 1) * (1.5 + Math.random() * 2.5), born: delay, life: T.hit - delay, size: 1 + Math.random() * 2.2, px: null, py: null });
+      P.push({ kind: 'd', a, r: R0 * (0.35 + Math.random() * 0.75), born: Math.random() * (T.hit * 0.7), size: 0.5 + Math.random() * 1.1, drift: (Math.random() - 0.5) * 0.6 });
     }
-    let sparksMade = false, shake = 0;
-    const rings = [];
+    let hitDone = false, skipped = false, ended = false;
     const t0 = performance.now();
-    let skipped = false, ended = false;
-    const lockSpin = ()=>{
-      if(!T.lock) return;
-      window._megaDropActive = true;
-      isSpinning = true;
-      spinBtn.disabled = true;
-    };
-    lockSpin();
+    if(T.lock){ window._megaDropActive = true; isSpinning = true; spinBtn.disabled = true; }
 
-    function makeSparks(){
-      sparksMade = true;
-      for(let i = 0; i < T.sparks; i++){
-        const a = Math.random() * Math.PI * 2;
-        const sp = (180 + Math.random() * 520) * (tierKey === 'very_good' ? 1.4 : 1);
-        P.push({ kind: 's', x: cx(), y: cy(), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, born: (performance.now() - t0) / 1000, life: 0.8 + Math.random() * 1.4, size: 1 + Math.random() * 2.5 });
-      }
-      for(let k = 0; k < T.rings; k++) rings.push({ born: (performance.now() - t0) / 1000 + k * 0.12, ch: k });
-      shake = tierKey === 'very_good' ? 1 : (tierKey === 'good' ? 0.5 : 0);
+    function onHit(){
+      hitDone = true;
       ov.classList.add('dfx-hit');
-      // the full rarity is on screen from the first frame; the hit just makes it pop
-      if(num && denom > 0){ num.textContent = Math.round(denom).toLocaleString('en-US'); num.classList.add('dfx-num-pop'); }
-      if(soundOn) try{ if(tierKey !== 'normal') AMB.fx.sub(tierKey === 'very_good' ? 0.7 : 0.45); AMB.fx.shimmer(660, tierKey === 'very_good' ? 0.14 : 0.09); }catch(e){}
+      for(let i = 0; i < T.embers; i++){
+        P.push({ kind: 'e', x: cx() + (Math.random() - 0.5) * W() * 0.5, y: cy() + (Math.random() - 0.3) * H() * 0.25,
+          vx: (Math.random() - 0.5) * 30, vy: -18 - Math.random() * 40, born: T.hit + Math.random() * 1.2, life: 2 + Math.random() * 3, size: 0.6 + Math.random() * 1.6, ph: Math.random() * 6 });
+      }
     }
     function finish(immediate){
       if(ended) return;
@@ -10743,15 +12093,13 @@ const DropFX = (function(){
         if(active && active.ov === ov) active = null;
         try{ window.dispatchEvent(new CustomEvent('dropfx-end')); }catch(e){}
         if(T.lock){
-          window._megaDropActive = false;
-          window._superDropActive = false;
-          isSpinning = false;
-          spinBtn.disabled = false;
+          window._megaDropActive = false; window._superDropActive = false;
+          isSpinning = false; spinBtn.disabled = false;
           if(autoSpinEnabled && !immediate) showPreviewsThenReveal();
         }
         if(done) done();
       };
-      if(immediate) remove(); else BGClock.timeout(remove, 650);
+      if(immediate) remove(); else BGClock.timeout(remove, 800);
     }
     ov.addEventListener('pointerdown', ()=>{ const t = (performance.now() - t0) / 1000; if(t > T.hit + 0.8 && !skipped){ skipped = true; finish(false); } });
     const onHide = ()=>{
@@ -10762,119 +12110,917 @@ const DropFX = (function(){
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('dropfx-end', ()=> document.removeEventListener('visibilitychange', onHide), { once:true });
 
+    // a horizontal anamorphic streak: hot white core, the aura's colour around it
+    function streak(x0, y0, width, k){
+      if(k <= 0.002) return;
+      const g = ctx.createLinearGradient(x0 - width, 0, x0 + width, 0);
+      g.addColorStop(0, col(0)); g.addColorStop(0.35, col(0.35 * k)); g.addColorStop(0.5, warm(0.95 * k)); g.addColorStop(0.65, col(0.35 * k)); g.addColorStop(1, col(0));
+      ctx.fillStyle = g;
+      ctx.fillRect(x0 - width, y0 - 1.2, width * 2, 2.4);
+      const g2 = ctx.createLinearGradient(x0 - width, 0, x0 + width, 0);
+      g2.addColorStop(0, col(0)); g2.addColorStop(0.5, col(0.22 * k)); g2.addColorStop(1, col(0));
+      ctx.fillStyle = g2;
+      ctx.fillRect(x0 - width, y0 - 14, width * 2, 28);
+    }
     function frame(){
       if(ended) return;
       const t = (performance.now() - t0) / 1000;
-      if(t >= T.total - 0.6 && !skipped){ skipped = true; finish(false); }
+      if(t >= T.total - 0.8 && !skipped){ skipped = true; finish(false); }
       requestAnimationFrame(frame);
       ctx.clearRect(0, 0, W(), H());
       const x0 = cx(), y0 = cy();
-      // backdrop: dims in, heartbeats before the hit (Очень Хороший)
-      let dimA = Math.min(1, t / 0.35) * T.dim;
-      dim.style.opacity = String(dimA);
+      dim.style.opacity = String(Math.min(1, t / 0.6) * T.dim);
       ctx.globalCompositeOperation = 'lighter';
+      // heartbeats in the dark before the hit
       if(T.heart && t < T.hit){
-        [0.25, 0.8].forEach(bt=>{
+        [0.05, 0.67].forEach(bt=>{
           const k = t - bt;
-          if(k > 0 && k < 0.5){
-            const g = ctx.createRadialGradient(x0, y0, 0, x0, y0, R0 * 0.5 * (0.4 + k));
-            g.addColorStop(0, col(0.35 * (1 - k / 0.5))); g.addColorStop(1, col(0));
+          if(k > 0 && k < 0.6){
+            const g = ctx.createRadialGradient(x0, y0, 0, x0, y0, R0 * (0.25 + k * 0.5));
+            g.addColorStop(0, col(0.12 * (1 - k / 0.6))); g.addColorStop(1, col(0));
             ctx.fillStyle = g; ctx.fillRect(0, 0, W(), H());
           }
         });
       }
-      // gathering light before the hit
+      // gathering: a faint core and the streak growing toward the hit
       if(t < T.hit){
-        const k = t / T.hit;
-        const g = ctx.createRadialGradient(x0, y0, 0, x0, y0, 40 + 180 * k);
-        g.addColorStop(0, col(0.5 * k * k)); g.addColorStop(1, col(0));
+        const k = Math.pow(t / T.hit, 2.2);
+        const g = ctx.createRadialGradient(x0, y0, 0, x0, y0, 30 + 140 * k);
+        g.addColorStop(0, warm(0.35 * k)); g.addColorStop(1, col(0));
         ctx.fillStyle = g; ctx.fillRect(0, 0, W(), H());
+        streak(x0, y0, 40 + W() * 0.25 * k, k * 0.8);
       }
-      // rotating rays behind the name (Очень Хороший)
-      if(T.rays && t > T.hit){
-        const k = Math.min(1, (t - T.hit) / 0.6) * (1 - Math.max(0, (t - (T.total - 1.2)) / 1.2));
-        ctx.save(); ctx.translate(x0, y0); ctx.rotate(t * 0.25);
-        for(let i = 0; i < 14; i++){
-          ctx.rotate(Math.PI * 2 / 14);
-          const g = ctx.createLinearGradient(0, 0, R0, 0);
-          g.addColorStop(0, col(0.22 * k)); g.addColorStop(1, col(0));
-          ctx.fillStyle = g;
-          ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(R0, -R0 * 0.07); ctx.lineTo(R0, R0 * 0.07); ctx.closePath(); ctx.fill();
+      // the hit: one soft flash, the streak across the whole frame, then it settles
+      if(t >= T.hit && !hitDone) onHit();
+      if(hitDone){
+        const fk = t - T.hit;
+        if(fk < 0.6){ ctx.fillStyle = warm(T.flash * (1 - fk / 0.6) * (1 - fk / 0.6)); ctx.fillRect(0, 0, W(), H()); }
+        const settle = Math.max(0.22, Math.exp(-fk * 1.6)) * (1 - Math.max(0, (t - (T.total - 1.4)) / 1.4));
+        streak(x0, y0, W() * (0.55 + 0.1 * Math.exp(-fk * 2)), settle);
+        // a slow halo behind the title
+        const hg = ctx.createRadialGradient(x0, y0, 0, x0, y0, R0 * 0.55);
+        hg.addColorStop(0, col(0.16 * settle)); hg.addColorStop(1, col(0));
+        ctx.fillStyle = hg; ctx.fillRect(0, 0, W(), H());
+        for(let k = 0; k < T.rings; k++){
+          const age = fk - k * 0.35;
+          if(age > 0 && age < 2.4){
+            const rad = 40 + age * Math.max(W(), H()) * 0.32;
+            ctx.lineWidth = 1.2; ctx.strokeStyle = col(0.28 * (1 - age / 2.4));
+            ctx.beginPath(); ctx.ellipse(x0, y0, rad, rad * 0.32, 0, 0, 6.283); ctx.stroke();
+          }
         }
-        ctx.restore();
+        if(T.rays){
+          const k = Math.min(1, fk / 1.2) * (1 - Math.max(0, (t - (T.total - 1.6)) / 1.6));
+          ctx.save(); ctx.translate(x0, y0); ctx.rotate(t * 0.04);
+          for(let i = 0; i < 18; i++){
+            ctx.rotate(Math.PI * 2 / 18);
+            const g = ctx.createLinearGradient(0, 0, R0 * 1.2, 0);
+            g.addColorStop(0, col(0.07 * k)); g.addColorStop(1, col(0));
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(R0 * 1.2, -R0 * 0.03); ctx.lineTo(R0 * 1.2, R0 * 0.03); ctx.closePath(); ctx.fill();
+          }
+          ctx.restore();
+        }
       }
-      // particles
+      // dust drawn slowly toward the middle, embers rising afterwards
       for(let i = P.length - 1; i >= 0; i--){
         const p = P[i];
-        const age = t - p.born;
-        if(age < 0) continue;
-        if(p.kind === 'g'){
-          const k = Math.min(1, age / p.life);
-          const ease = k * k * k;
-          const r = p.r * (1 - ease);
-          const a = p.a + p.spin * ease * 2.2;
-          const x = x0 + Math.cos(a) * r, y = y0 + Math.sin(a) * r * 0.85;
-          if(tierKey === 'very_good' && p.px !== null){
-            ctx.strokeStyle = col(0.5 * k); ctx.lineWidth = p.size;
-            ctx.beginPath(); ctx.moveTo(p.px, p.py); ctx.lineTo(x, y); ctx.stroke();
-          } else {
-            ctx.fillStyle = col(0.75 * Math.min(1, age * 3));
-            ctx.beginPath(); ctx.arc(x, y, p.size, 0, 6.283); ctx.fill();
-          }
-          p.px = x; p.py = y;
+        if(p.kind === 'd'){
+          const age = t - p.born;
+          if(age < 0) continue;
+          const k = Math.min(1, age / (T.hit - p.born + 0.001));
+          const e = k * k * k;
+          const r = p.r * (1 - e);
+          const a = p.a + p.drift * e;
+          const x = x0 + Math.cos(a) * r, y = y0 + Math.sin(a) * r * 0.55;
+          ctx.fillStyle = warm(0.5 * Math.min(1, age * 2) * (0.4 + 0.6 * e));
+          ctx.fillRect(x - p.size / 2, y - p.size / 2, p.size, p.size);
           if(k >= 1) P.splice(i, 1);
         } else {
+          const age = t - p.born;
+          if(age < 0) continue;
           const k = age / p.life;
           if(k >= 1){ P.splice(i, 1); continue; }
-          const drag = Math.exp(-age * 2.2);
-          const x = p.x + p.vx * (1 - drag) / 2.2, y = p.y + p.vy * (1 - drag) / 2.2 + 40 * age * age;
-          ctx.fillStyle = k < 0.15 ? 'rgba(255,255,255,0.95)' : col(1 - k);
-          ctx.beginPath(); ctx.arc(x, y, p.size * (1 - k * 0.6), 0, 6.283); ctx.fill();
-        }
-      }
-      if(t >= T.hit && !sparksMade) makeSparks();
-      // flash and shockwaves
-      if(sparksMade){
-        const fk = t - T.hit;
-        if(fk < 0.35){
-          ctx.fillStyle = `rgba(255,255,255,${(tierKey === 'normal' ? 0.35 : 0.9) * (1 - fk / 0.35)})`;
-          ctx.fillRect(0, 0, W(), H());
-        }
-        const chans = [[255, 80, 80], [80, 255, 140], [90, 140, 255]];
-        rings.forEach(rg=>{
-          const age = t - rg.born;
-          if(age < 0 || age > 1.6) return;
-          const rad = age * Math.max(W(), H()) * 0.75;
-          const a = 1 - age / 1.6;
-          ctx.lineWidth = 6 * a + 1;
-          ctx.strokeStyle = T.rings === 3 ? `rgba(${chans[rg.ch].join(',')},${0.5 * a})` : col(0.6 * a);
-          ctx.beginPath(); ctx.ellipse(x0, y0, rad, rad * 0.86, 0, 0, 6.283); ctx.stroke();
-        });
-        // star bursts while the name holds
-        if(tierKey === 'very_good' && fk > 0.6 && fk < T.total - T.hit - 1.2 && Math.random() < 0.08){
-          const a = Math.random() * 6.283, rr = 120 + Math.random() * Math.min(W(), H()) * 0.35;
-          for(let s2 = 0; s2 < 14; s2++){
-            const b = Math.random() * 6.283, sp = 60 + Math.random() * 160;
-            P.push({ kind: 's', x: x0 + Math.cos(a) * rr, y: y0 + Math.sin(a) * rr * 0.8, vx: Math.cos(b) * sp, vy: Math.sin(b) * sp, born: t, life: 0.7 + Math.random() * 0.6, size: 1 + Math.random() * 1.5 });
-          }
+          const x = p.x + p.vx * age + Math.sin(age * 1.7 + p.ph) * 6, y = p.y + p.vy * age;
+          const fl = 0.6 + 0.4 * Math.sin(age * 9 + p.ph);
+          ctx.fillStyle = col(0.7 * Math.sin(Math.PI * k) * fl);
+          ctx.beginPath(); ctx.arc(x, y, p.size, 0, 6.283); ctx.fill();
         }
       }
       ctx.globalCompositeOperation = 'source-over';
-      // shake the whole scene for a moment after the hit
-      if(shake > 0){
-        shake *= 0.9;
-        const s = shake * 9;
-        ov.style.transform = `translate(${(Math.random() - 0.5) * s}px, ${(Math.random() - 0.5) * s}px)`;
-        if(shake < 0.02){ shake = 0; ov.style.transform = ''; }
-      }
     }
     requestAnimationFrame(frame);
     active = { ov, finish };
     return active;
   }
-  return { play, get active(){ return active; } };
+  return { play, get active(){ return active || (window.Cinema && window.Cinema.active) || null; } };
 })();
 window.DropFX = DropFX;
+
+// ============================================================
+// КИНО — the drops of СУПЕРСКИЙ and above don't get the trailer: they get a film.
+// 20 seconds, full screen, a real 3D scene (one WebGL2 shader per film, loops bounded by
+// a uniform so Windows' HLSL compiler doesn't unroll them), its own score, timed sound,
+// and a title sequence in the DOM so the aura keeps its own name styling. Every film is
+// linked once in the background after the game starts, so when the aura drops the GPU
+// already has it in its cache. A click after the first two seconds skips to the end.
+// ============================================================
+const CINE = {};
+const CINE_HEAD = '#version 300 es\n' + SHADER_PRECISION + 'precision highp int;\n' + SHADER_NOISE + FBM_GLSL + `
+  out vec4 fragColor;
+  uniform vec2 u_res; uniform float u_time; uniform int u_zero;
+  #define ZERO u_zero
+`;
+const Cinema = (function(){
+  let active = null, warmed = false;
+  const VS = '#version 300 es\nin vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }';
+  function build(gl, src){
+    const sh = (type, s)=>{ const o = gl.createShader(type); gl.shaderSource(o, s); gl.compileShader(o); return o; };
+    const vs = sh(gl.VERTEX_SHADER, VS), fs = sh(gl.FRAGMENT_SHADER, src);
+    const p = gl.createProgram();
+    gl.attachShader(p, vs); gl.attachShader(p, fs);
+    gl.bindAttribLocation(p, 0, 'a');
+    gl.linkProgram(p);
+    p._fs = fs;
+    return p;
+  }
+  // link every film once, in the background, so the real one comes straight out of the GPU cache
+  function prewarm(){
+    if(warmed) return;
+    warmed = true;
+    try{
+      const cv = document.createElement('canvas'); cv.width = cv.height = 8;
+      const gl = cv.getContext('webgl2'); if(!gl) return;
+      const par = gl.getExtension('KHR_parallel_shader_compile');
+      if(!par) return;   // without background linking this would freeze the game for a moment: skip
+      const progs = Object.keys(CINE).map(id=> build(gl, CINE[id].frag));
+      const poll = ()=>{
+        if(progs.every(p=> gl.getProgramParameter(p, par.COMPLETION_STATUS_KHR))){
+          const e = gl.getExtension('WEBGL_lose_context'); if(e) e.loseContext();
+        } else setTimeout(poll, 800);
+      };
+      setTimeout(poll, 800);
+    }catch(e){}
+  }
+  function play(id, name, done, opt){
+    const C = CINE[id];
+    if(!C || document.hidden) return null;
+    opt = opt || {};
+    if(active){ try{ active.finish(true); }catch(e){} }
+    const ov = document.createElement('div');
+    ov.id = 'cine';
+    ov.className = 'cine cine-' + id;
+    ov.setAttribute('aria-hidden', 'true');
+    ov.innerHTML = '<canvas class="cine-cv"></canvas><div class="cine-bar cine-bar-t"></div><div class="cine-bar cine-bar-b"></div><div class="cine-titles"></div><div class="cine-flash"></div><div class="cine-skip">клик — пропустить</div><div class="cine-fade"></div>';
+    document.body.appendChild(ov);
+    const cv = ov.querySelector('.cine-cv');
+    let gl = null;
+    try{ gl = cv.getContext('webgl2', { antialias:false, alpha:false, depth:false, stencil:false, powerPreference:'high-performance', preserveDrawingBuffer:false }); }catch(e){}
+    if(!gl){ ov.remove(); return null; }
+    const par = gl.getExtension('KHR_parallel_shader_compile');
+    const prog = build(gl, C.frag);
+    const locs = {};
+    const U = (n)=> (n in locs) ? locs[n] : (locs[n] = gl.getUniformLocation(prog, n));
+    const scale = GFX.mode === 'ultra' ? GFX.ultraScale() : GFX.mode === 'eco' ? 0.5 : GFX.mode === 'high' ? 0.9 : 0.75;
+    const resize = ()=>{ cv.width = Math.max(2, Math.floor(window.innerWidth * scale)); cv.height = Math.max(2, Math.floor(window.innerHeight * scale)); };
+    resize();
+    window.addEventListener('resize', resize);
+    const titles = ov.querySelector('.cine-titles'), flashEl = ov.querySelector('.cine-flash');
+    const st = C.setup ? C.setup(titles, { id, name, opt }) : {};
+    const soundOn = dropSoundOn(opt.cls || rarityClassKeyFor(id));
+    const timers = [];
+    let ended = false, ready = false, t0 = 0;
+    const waitFrom = performance.now();
+    // the film takes the whole game: no spinning underneath it, and the theme stops drawing
+    window._megaDropActive = true; isSpinning = true; spinBtn.disabled = true;
+    window._cinePlaying = true;
+    // opt.seek (admin / testing): start the film this many seconds in
+    const seek = Math.max(0, +opt.seek || 0);
+    const at = (sec, fn)=>{ if(sec >= seek) timers.push(setTimeout(()=>{ if(!ended) try{ fn(AMB); }catch(e){} }, (sec - seek) * 1000)); };
+    function start(){
+      ready = true;
+      gl.useProgram(prog);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      t0 = performance.now() - seek * 1000;
+      ov.classList.add('cine-run');
+      if(soundOn && C.music && !seek) try{ AMB.preview(C.music); }catch(e){}
+      if(soundOn && C.sound) C.sound(at);
+      timers.push(setTimeout(()=>{ if(!ended) ov.classList.add('cine-skippable'); }, 2000));
+    }
+    function finish(immediate){
+      if(ended) return;
+      ended = true;
+      timers.forEach(clearTimeout);
+      window.removeEventListener('resize', resize);
+      document.removeEventListener('visibilitychange', onHide);
+      if(soundOn && C.music) try{ AMB.stopPreview(); }catch(e){}
+      ov.classList.add('cine-out');
+      window._cinePlaying = false;
+      const remove = ()=>{
+        try{ const e = gl.getExtension('WEBGL_lose_context'); if(e) e.loseContext(); }catch(e){}
+        try{ ov.remove(); }catch(e){}
+        if(active && active.ov === ov) active = null;
+        try{ window.dispatchEvent(new CustomEvent('dropfx-end')); }catch(e){}
+        window._megaDropActive = false; window._superDropActive = false;
+        isSpinning = false; spinBtn.disabled = false;
+        if(autoSpinEnabled && !immediate) showPreviewsThenReveal();
+        if(done) try{ done(); }catch(e){}
+      };
+      if(immediate) remove(); else BGClock.timeout(remove, 950);
+    }
+    const onHide = ()=>{
+      if(!document.hidden || ended) return;
+      finish(true);
+      if(autoSpinEnabled) BGClock.timeout(()=>{ if(!isSpinning) showPreviewsThenReveal(); }, 30);
+    };
+    // the film couldn't be built: the trailer plays instead, and it owns the callback
+    const fallback = ()=>{
+      const d = done; done = null;
+      finish(true);
+      try{ DropFX.play(id, name, 'very_good', d, Object.assign({}, opt, { noCine: true })); }catch(e){}
+    };
+    document.addEventListener('visibilitychange', onHide);
+    ov.addEventListener('pointerdown', ()=>{ if(ready && (performance.now() - t0) / 1000 > 2) finish(false); });
+    function frame(){
+      if(ended) return;
+      requestAnimationFrame(frame);
+      if(!ready){
+        const linked = !par || gl.getProgramParameter(prog, par.COMPLETION_STATUS_KHR);
+        if(linked){
+          if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+            console.warn('[cinema] ' + id + ': ' + gl.getShaderInfoLog(prog._fs) + ' ' + gl.getProgramInfoLog(prog));
+            fallback();
+            return;
+          }
+          start();
+        } else if(performance.now() - waitFrom > 15000){ fallback(); return; }
+        else return;
+      }
+      const t = (performance.now() - t0) / 1000;
+      gl.viewport(0, 0, cv.width, cv.height);
+      gl.uniform2f(U('u_res'), cv.width, cv.height);
+      gl.uniform1f(U('u_time'), t);
+      if(C.frame) C.frame(gl, U, t, st);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      if(C.dom) C.dom(t, st, flashEl);
+      if(t >= C.duration) finish(false);
+    }
+    requestAnimationFrame(frame);
+    active = { ov, finish };
+    return active;
+  }
+  return { play, prewarm, get active(){ return active; } };
+})();
+window.Cinema = Cinema; window.CINE = CINE;
+// helpers for the films' timelines
+const cineSS = (a, b, x)=>{ x = Math.min(1, Math.max(0, (x - a) / (b - a))); return x * x * (3 - 2 * x); };
+const cineMix = (a, b, k)=> a + (b - a) * k;
+// split a name into letters that can fly on their own; a line only ever breaks between words,
+// and a lone colon stays with the word before it
+function cineLetters(text, cls, style){
+  let i = 0;
+  const letter = (ch)=> `<i class="cl" style="--i:${i++};--dx:${((Math.random() - 0.5) * 520).toFixed(0)}px;--dy:${((Math.random() - 0.5) * 300).toFixed(0)}px;--r:${((Math.random() - 0.5) * 140).toFixed(0)}deg">${ch === ' ' ? '&nbsp;' : ch}</i>`;
+  const words = String(text).replace(/ ([:·—-]) /g, '\u0001$1 ').split(' ');
+  return `<span class="${cls}" style="${style || ''}">` + words.map(w=> '<span class="cw">' + Array.from(w.replace(/\u0001/g, ' ')).map(letter).join('') + '</span>').join('<i class="cl-sp"> </i>') + '</span>';
+}
+
+// ------------------------------------------------------------
+// ГЛОКУС : КОРОЛЬ КАПИБАР — «Коронация», first person. The doors open on a throne hall
+// in candlelight; sun pours through tall windows in dusty shafts. You walk the red
+// carpet between marble columns while the court of capybaras in robes bows as you pass,
+// climb the dais, turn and sit on the golden throne. The archbishop lifts the crown, you
+// look up at it, it comes down onto your head — a flash of gold — and the hall erupts.
+// Over it the name «Глокус» appears, burns with light, breaks apart and comes back
+// together as «Глокус : Король Капибар».
+// ------------------------------------------------------------
+CINE.glokus_king = {
+  duration: 20,
+  music: 'cine_coronation',
+  frag: CINE_HEAD + `
+    uniform vec3 u_ro; uniform vec2 u_look;
+    uniform vec3 u_crown; uniform float u_lights; uniform float u_flash; uniform float u_cheer; uniform float u_bowZ;
+    uniform vec3 u_arch; uniform float u_archA; uniform float u_ctilt; uniform vec3 u_shL; uniform vec3 u_shR; uniform vec3 u_hdL; uniform vec3 u_hdR;
+    const vec3 SUN = vec3(-0.66, 0.46, -0.6);
+    const vec3 GOLD = vec3(1.0, 0.76, 0.3);
+    const float AS = 0.72;
+    float sdBox(vec3 p, vec3 b){ vec3 q = abs(p) - b; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0); }
+    float sdCap(vec3 p, vec3 a, vec3 b, float r){ vec3 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h) - r; }
+    float sdEll(vec3 p, vec3 r){ float k0 = length(p / r); float k1 = length(p / (r * r)); return k0 * (k0 - 1.0) / max(k1, 1e-5); }
+    float smin(float a, float b, float k){ float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
+    float CM;
+    // the crown, 1.6 times life size: band, two crossed arches, orb and cross, pearls on the points, jewels round the band
+    float crownD(vec3 p){
+      p /= 1.6;
+      float band = max(abs(length(p.xz) - 0.11) - 0.012, abs(p.y) - 0.035);
+      vec3 a = p - vec3(0.0, 0.03, 0.0);
+      float arch1 = max(length(vec2(length(a.xy) - 0.105, a.z)) - 0.009, -a.y);
+      float arch2 = max(length(vec2(length(a.zy) - 0.105, a.x)) - 0.009, -a.y);
+      float orb = length(p - vec3(0.0, 0.155, 0.0)) - 0.022;
+      float crs = min(sdBox(p - vec3(0.0, 0.195, 0.0), vec3(0.004, 0.022, 0.004)), sdBox(p - vec3(0.0, 0.2, 0.0), vec3(0.014, 0.004, 0.004)));
+      float sec = 0.785398;
+      float an = mod(atan(p.z, p.x) + sec * 0.5, sec) - sec * 0.5;
+      vec3 q = vec3(cos(an) * length(p.xz), p.y, sin(an) * length(p.xz));
+      float pearl = length(q - vec3(0.11, 0.058, 0.0)) - 0.015;
+      float jewel = length(q - vec3(0.123, 0.0, 0.0)) - 0.013;
+      float cap = max(sdEll(p - vec3(0.0, 0.03, 0.0), vec3(0.1, 0.1, 0.1)), -p.y);
+      float g = min(min(band, min(arch1, arch2)), min(orb, crs));
+      float d = min(g, min(pearl, min(jewel, cap)));
+      CM = d == g ? 12.0 : (d == jewel ? 13.0 : (d == pearl ? 14.0 : 15.0));
+      return d * 1.6;
+    }
+    vec2 map(vec3 p){
+      float d = p.y, m = 1.0;
+      float w = 9.0 - abs(p.x); if(w < d){ d = w; m = 2.0; }
+      float e = min(p.z + 7.0, 58.0 - p.z); if(e < d){ d = e; m = 2.0; }
+      float vy = 12.4 + 2.6 * sqrt(max(0.0, 1.0 - (p.x / 9.0) * (p.x / 9.0)));
+      float c = (vy - p.y) * 0.8; if(c < d){ d = c; m = 3.0; }
+      // marble columns with gilded bases and capitals (outside their band, a safe step toward it)
+      if(abs(abs(p.x) - 6.0) < 1.8){
+        vec3 q = vec3(abs(p.x) - 6.0, p.y, p.z - 3.0 - 6.0 * clamp(floor((p.z - 3.0) / 6.0 + 0.5), 0.0, 7.0));
+        float r = 0.62 + 0.022 * cos(atan(q.z, q.x) * 16.0);
+        float shaft = max(length(q.xz) - r, abs(q.y - 5.6) - 5.6) * 0.8;
+        float base = min(sdBox(q - vec3(0.0, 0.25, 0.0), vec3(0.88, 0.25, 0.88)), sdBox(q - vec3(0.0, 0.62, 0.0), vec3(0.74, 0.12, 0.74)));
+        float cap = min(sdBox(q - vec3(0.0, 11.0, 0.0), vec3(0.95, 0.3, 0.95)), sdBox(q - vec3(0.0, 10.55, 0.0), vec3(0.76, 0.15, 0.76)));
+        float cd = min(shaft, min(base, cap));
+        if(cd < d){ d = cd; m = 4.0; }
+      } else d = min(d, abs(abs(p.x) - 6.0) - 1.0);
+      // banners on the walls between the columns
+      {
+        vec3 q = vec3(abs(p.x) - 8.85, p.y - 8.0, p.z - 6.0 * clamp(floor(p.z / 6.0 + 0.5), 1.0, 8.0));
+        float bd = sdBox(q, vec3(0.05, 2.6, 1.05));
+        if(bd < d){ d = bd; m = 5.0; }
+      }
+      // the court along the carpet in robes and ermine, bowing as you pass and cheering at the end
+      float cb = sdBox(vec3(abs(p.x) - 3.9, p.y - 1.4, p.z - 25.0), vec3(1.0, 1.5, 21.2));
+      if(cb < 0.1){
+        float cz = clamp(floor(p.z / 1.6) * 1.6 + 0.8, 4.8, 45.6);
+        vec3 q = vec3(abs(p.x) - 3.9, p.y, p.z - cz);
+        float bow = smoothstep(5.0, 0.5, abs(u_bowZ - cz)) * 0.6;
+        q.y -= u_cheer * abs(sin(u_time * 7.0 + cz * 1.7 + sign(p.x) * 2.0)) * 0.22;
+        float rr = mix(0.46, 0.3, clamp(q.y / 1.3, 0.0, 1.0));
+        float body = max(length(q.xz) - rr, max(-q.y, q.y - 1.3)) * 0.85;
+        body = min(body, sdEll(q - vec3(0.0, 1.27, 0.0), vec3(0.37, 0.2, 0.35)));
+        if(body < d){ d = body; m = 6.0; }
+        vec3 hq = q - vec3(-0.06 - bow * 0.35, 1.6 - bow * 0.42, 0.0);
+        float head = min(sdEll(hq, vec3(0.27, 0.27, 0.25)), sdEll(hq - vec3(-0.27, -0.07, 0.0), vec3(0.19, 0.15, 0.16)));
+        head = min(head, length(vec3(hq.x - 0.06, hq.y - 0.23, abs(hq.z) - 0.15)) - 0.06);
+        if(head < d){ d = head; m = 7.0; }
+      } else d = min(d, cb);
+      // the dais, the golden throne under its canopy, and the archbishop
+      if(p.z > 47.5){
+        float dais = min(sdBox(p - vec3(0.0, 0.1, 53.0), vec3(4.5, 0.1, 4.6)), min(sdBox(p - vec3(0.0, 0.3, 53.6), vec3(3.8, 0.1, 4.0)), sdBox(p - vec3(0.0, 0.5, 54.2), vec3(3.1, 0.1, 3.4))));
+        if(dais < d){ d = dais; m = 8.0; }
+        vec3 tq = p - vec3(0.0, 0.6, 54.95);
+        float seat = sdBox(tq - vec3(0.0, 0.48, 0.0), vec3(0.85, 0.12, 0.7)) - 0.04;
+        float legs = sdBox(vec3(abs(tq.x) - 0.75, tq.y - 0.2, abs(tq.z) - 0.6), vec3(0.08, 0.2, 0.08));
+        float back = sdBox(tq - vec3(0.0, 1.75, 0.62), vec3(0.85, 1.2, 0.1)) - 0.04;
+        float crest = length(vec2(length(tq.xy - vec2(0.0, 2.95)) - 0.55, tq.z - 0.62)) - 0.09;
+        crest = min(crest, length(tq - vec3(0.0, 3.55, 0.62)) - 0.13);
+        float arms = sdBox(vec3(abs(tq.x) - 0.9, tq.y - 0.85, tq.z), vec3(0.08, 0.3, 0.62)) - 0.03;
+        arms = min(arms, length(vec3(abs(tq.x) - 0.9, tq.y - 1.2, tq.z + 0.6)) - 0.11);
+        float th = min(min(seat, legs), min(min(back, crest), arms));
+        if(th < d){ d = th; m = 9.0; }
+        // the canopy over the throne and its curtains
+        float can = min(sdBox(p - vec3(0.0, 4.9, 55.6), vec3(2.0, 0.2, 1.4)), sdBox(vec3(abs(p.x) - 1.95, p.y - 2.6, p.z - 55.9), vec3(0.09 + 0.04 * sin(p.z * 9.0), 2.3, 1.0)));
+        if(can < d){ d = can; m = 16.0; }
+        // the archbishop, a capybara a head shorter than you seated on the dais: a red cope over
+        // a white alb, a mitre, arms that hold the crown (modelled at full size, drawn at AS)
+        vec3 aq = p - u_arch;
+        float bnd = length(aq - vec3(0.0, 1.3, 0.0)) - 2.0;
+        if(bnd < 0.1){
+          float ca = cos(u_archA), sa = sin(u_archA);
+          vec3 q = vec3(ca * aq.x - sa * aq.z, aq.y, sa * aq.x + ca * aq.z) / AS;
+          float rr = mix(0.56, 0.25, clamp(q.y / 1.7, 0.0, 1.0));
+          float robe = max(length(q.xz * vec2(1.0, 1.12)) - rr, max(-q.y, q.y - 1.7)) * 0.85;
+          robe = smin(robe, sdEll(q - vec3(0.0, 1.62, 0.0), vec3(0.33, 0.17, 0.27)), 0.12);
+          // a capybara's head: a long blunt muzzle, small ears high up
+          vec3 hq = q - vec3(0.0, 2.03, 0.02);
+          float head = smin(sdEll(hq, vec3(0.23, 0.21, 0.27)), sdEll(hq - vec3(0.0, -0.05, 0.25), vec3(0.16, 0.12, 0.18)), 0.09);
+          head = min(head, sdEll(vec3(abs(hq.x) - 0.14, hq.y - 0.19, hq.z + 0.08), vec3(0.05, 0.06, 0.035)));
+          float mitre = max(sdEll(hq - vec3(0.0, 0.3, -0.05), vec3(0.15, 0.33, 0.12)), 0.15 - hq.y);
+          float rb = min(robe, mitre) * AS;
+          head *= AS;
+          if(rb < d){ d = rb; m = 10.0; }
+          if(head < d){ d = head; m = 7.0; }
+          float sl = min(sdCap(p, u_shL, u_hdL, 0.062), sdCap(p, u_shR, u_hdR, 0.062));
+          sl = min(sl, min(length(p - u_hdL), length(p - u_hdR)) - 0.055);
+          if(sl < d){ d = sl; m = 17.0; }
+        } else d = min(d, bnd);
+      } else d = min(d, 48.3 - p.z);
+      // the crown
+      float crb = length(p - u_crown) - 0.42;
+      if(crb < 0.08){
+        vec3 cq = p - u_crown;
+        float ct = cos(u_ctilt), st = sin(u_ctilt);
+        cq = vec3(cq.x, ct * cq.y - st * cq.z, st * cq.y + ct * cq.z);
+        float cd = crownD(cq);
+        if(cd < d){ d = cd; m = CM; }
+      } else d = min(d, crb);
+      // chandeliers
+      {
+        vec3 q = vec3(p.x, p.y - 10.2, p.z - 6.0 * clamp(floor(p.z / 6.0 + 0.5), 1.0, 8.0));
+        float ch = min(length(vec2(length(q.xz) - 0.9, q.y)) - 0.06, length(q) - 0.25);
+        if(ch < d){ d = ch; m = 11.0; }
+      }
+      return vec2(d, m);
+    }
+    // sun through the tall windows of the left wall: is this point inside a shaft?
+    float shaft(vec3 p){
+      float s = (p.x + 9.0) / -SUN.x;
+      vec3 w = p + SUN * s;
+      float zz = mod(w.z + 3.0, 6.0) - 3.0;
+      float top = 10.4 + 1.1 * sqrt(max(0.0, 1.0 - zz * zz / 1.44));
+      float inW = smoothstep(1.25, 1.05, abs(zz)) * smoothstep(3.4, 3.8, w.y) * smoothstep(top + 0.2, top - 0.2, w.y);
+      inW *= step(5.0, w.z) * step(w.z, 49.0) * step(0.0, s);
+      return inW * (0.78 + 0.22 * step(0.08, abs(zz))) * (0.8 + 0.2 * step(0.08, abs(fract(w.y / 1.6) - 0.5)));
+    }
+    vec3 bodyCol(float z){
+      float k = fract(sin(floor(z / 1.6) * 12.9898) * 43758.5) * 4.0;
+      return k < 1.0 ? vec3(0.62, 0.06, 0.12) : (k < 2.0 ? vec3(0.12, 0.2, 0.55) : (k < 3.0 ? vec3(0.08, 0.38, 0.2) : vec3(0.38, 0.1, 0.45)));
+    }
+    void main(){
+      vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
+      float yaw = u_look.x, pit = u_look.y;
+      vec3 fw = vec3(sin(yaw) * cos(pit), sin(pit), cos(yaw) * cos(pit));
+      vec3 rt = normalize(vec3(fw.z, 0.0, -fw.x));
+      vec3 up = cross(fw, rt);
+      vec3 rd = normalize(fw * 1.15 + rt * uv.x + up * uv.y);
+      vec3 ro = u_ro;
+      // march
+      float t = 0.02; vec2 h = vec2(1.0, 0.0);
+      for(int i = 0; i < 140 + ZERO; i++){
+        h = map(ro + rd * t);
+        if(h.x < 0.0004 * t + 0.0005 || t > 80.0) break;
+        t += h.x;
+      }
+      vec3 P = ro + rd * t;
+      float m = h.y;
+      vec3 n = vec3(0.0);
+      for(int i = 0; i < 4 + ZERO; i++){
+        vec3 e = 0.5773 * (2.0 * vec3(float(((i + 3) >> 1) & 1), float((i >> 1) & 1), float(i & 1)) - 1.0);
+        n += e * map(P + 0.0012 * e).x;
+      }
+      n = normalize(n);
+      float ao = 0.0, sc = 1.0;
+      for(int i = 0; i < 4 + ZERO; i++){
+        float hr = 0.06 + 0.22 * float(i);
+        ao += (hr - map(P + n * hr).x) * sc; sc *= 0.7;
+      }
+      ao = clamp(1.0 - 1.6 * ao, 0.25, 1.0);
+      // materials
+      vec3 alb = vec3(0.8); float gloss = 0.0; vec3 emis = vec3(0.0);
+      if(m < 1.5){
+        vec2 g = floor(P.xz / 1.2);
+        float chk = mod(g.x + g.y, 2.0);
+        alb = mix(vec3(0.9, 0.87, 0.82), vec3(0.08, 0.07, 0.08), chk) * (0.92 + 0.12 * noise(P.xz * 3.0));
+        gloss = 0.6;
+        if(abs(P.x) < 1.6 && P.z < 48.5){
+          alb = vec3(0.55, 0.04, 0.08) * (0.9 + 0.1 * noise(P.xz * 12.0));
+          alb = mix(alb, GOLD * 0.85, smoothstep(1.32, 1.38, abs(P.x)) * smoothstep(1.52, 1.46, abs(P.x)));
+          gloss = 0.05;
+        }
+      } else if(m < 2.5){
+        alb = vec3(0.86, 0.8, 0.7) * (0.9 + 0.1 * noise(P.yz * 2.0));
+        float zz = mod(P.z + 3.0, 6.0) - 3.0;
+        float top = 10.4 + 1.1 * sqrt(max(0.0, 1.0 - zz * zz / 1.44));
+        float win = smoothstep(1.25, 1.15, abs(zz)) * step(3.6, P.y) * step(P.y, top) * step(5.0, P.z) * step(P.z, 49.0) * step(8.9, abs(P.x));
+        vec3 sky = mix(vec3(1.0, 0.9, 0.7), vec3(0.6, 0.75, 1.0), smoothstep(4.0, 11.0, P.y));
+        emis += win * sky * (P.x < 0.0 ? 2.6 : 0.9) * (0.75 + 0.25 * step(0.08, abs(zz))) * (0.3 + 0.7 * u_lights);
+        alb *= 1.0 - win;
+        alb = mix(alb, GOLD * 0.7, smoothstep(0.08, 0.0, abs(P.y - 12.2)) + smoothstep(0.06, 0.0, abs(P.y - 3.4)));
+        // behind the throne: a velvet tapestry with the royal crown in gold
+        if(P.z > 57.8 && abs(P.x) < 3.8 && P.y < 10.2){
+          vec2 tp = vec2(P.x, P.y - 6.4);
+          alb = vec3(0.5, 0.03, 0.07) * (0.72 + 0.28 * sin(P.x * 7.0 + sin(P.y * 0.7)));
+          vec2 dm = abs(fract(vec2(P.x, P.y) * 1.3) - 0.5);
+          alb = mix(alb, GOLD * 0.55, smoothstep(0.1, 0.05, abs(dm.x + dm.y - 0.35)) * 0.5);
+          alb = mix(alb, GOLD, smoothstep(0.12, 0.05, min(3.8 - abs(P.x), 10.2 - P.y)));
+          float ring = abs(length(tp) - 1.35);
+          float crn = max(abs(tp.x) - 0.75, abs(tp.y + 0.15) - 0.32 + 0.22 * step(0.5, fract(tp.x * 2.0 + 0.25)) * step(0.0, tp.y + 0.15));
+          alb = mix(alb, GOLD, smoothstep(0.08, 0.03, ring) + smoothstep(0.03, -0.02, crn));
+          gloss = 0.2;
+        }
+        // the great doors at the far end
+        if(P.z < -6.8 && abs(P.x) < 2.6 && P.y < 7.0){
+          float pan = step(0.06, abs(P.x)) * step(0.1, abs(fract(P.y / 1.6) - 0.5));
+          alb = mix(vec3(0.16, 0.08, 0.04), vec3(0.3, 0.16, 0.08), pan);
+          alb = mix(alb, GOLD, smoothstep(0.07, 0.0, abs(2.6 - abs(P.x))) + smoothstep(0.05, 0.0, abs(P.x)));
+        }
+      } else if(m < 3.5){
+        vec2 cf = abs(fract(vec2(P.x / 2.0, P.z / 3.0)) - 0.5);
+        alb = mix(vec3(0.1, 0.12, 0.3), GOLD * 0.7, smoothstep(0.42, 0.47, max(cf.x, cf.y)));
+        gloss = 0.3;
+      } else if(m < 4.5){
+        alb = vec3(0.82, 0.66, 0.62) * (0.9 + 0.12 * noise(vec2(atan(n.z, n.x) * 3.0, P.y * 2.0)));
+        if(P.y < 0.52 || P.y > 10.68) { alb = GOLD * 0.9; gloss = 0.9; } else gloss = 0.4;
+      } else if(m < 5.5){
+        vec3 q = vec3(P.x, P.y - 8.0, P.z - 6.0 * floor(P.z / 6.0 + 0.5));
+        alb = vec3(0.6, 0.04, 0.1) * (0.85 + 0.2 * sin(q.z * 9.0));
+        alb = mix(alb, GOLD, smoothstep(0.9, 0.95, abs(q.z)) + smoothstep(2.45, 2.55, abs(q.y)));
+        alb = mix(alb, GOLD, smoothstep(0.42, 0.35, length(q.zy - vec2(0.0, 0.8))) * smoothstep(0.2, 0.26, length(q.zy - vec2(0.0, 0.8))));
+      } else if(m < 6.5){
+        // the robe in the house colour, a gold hem, an ermine cape on the shoulders
+        float cz = clamp(floor(P.z / 1.6) * 1.6 + 0.8, 4.8, 45.6);
+        float ly = P.y - u_cheer * abs(sin(u_time * 7.0 + cz * 1.7 + sign(P.x) * 2.0)) * 0.22;
+        alb = bodyCol(cz + sign(P.x)) * (0.85 + 0.2 * sin(atan(P.z - cz, abs(P.x) - 3.9) * 9.0));
+        alb = mix(alb, GOLD, smoothstep(0.12, 0.08, ly) + smoothstep(0.03, 0.0, abs(ly - 0.9)) * 0.8);
+        float erm = smoothstep(1.1, 1.14, ly);
+        float spot = step(0.93, hash(floor(vec2(P.z * 11.0, ly * 11.0)) + floor(P.x * 11.0)));
+        alb = mix(alb, mix(vec3(0.96, 0.94, 0.9), vec3(0.04), spot), erm);
+        gloss = 0.15;
+      } else if(m < 7.5){
+        alb = vec3(0.55, 0.36, 0.2) * (0.85 + 0.25 * noise(P.xy * 40.0));
+        // eyes and a dark nose: the archbishop's in his own frame, the courtiers' toward the carpet
+        vec3 aq = P - u_arch - vec3(0.0, 2.03 * AS, 0.0);
+        if(dot(aq, aq) < 0.25){
+          float ca = cos(u_archA), sa = sin(u_archA);
+          vec3 q = vec3(ca * aq.x - sa * aq.z, aq.y, sa * aq.x + ca * aq.z - 0.02 * AS) / AS;
+          // a lighter, square muzzle; dark kind eyes with a glint; two small nostrils on top of the muzzle
+          alb = mix(alb, vec3(0.66, 0.48, 0.32), smoothstep(0.16, 0.24, q.z) * smoothstep(0.06, -0.01, q.y));
+          float eye = length(vec2(abs(q.x) - 0.15, q.y - 0.065) * vec2(1.0, 0.85));
+          float onEye = step(0.04, q.z) * step(q.z, 0.22);
+          alb = mix(alb, vec3(0.02, 0.015, 0.01), step(eye, 0.036) * onEye);
+          alb = mix(alb, vec3(1.0), step(length(vec2(abs(q.x) - 0.138, q.y - 0.078)), 0.011) * onEye);
+          alb = mix(alb, vec3(0.1, 0.05, 0.03), step(0.3, q.z) * step(length(vec2((abs(q.x) - 0.05) / 0.022, (q.y - 0.01) / 0.012)), 1.0));
+        } else {
+          float cz = clamp(floor(P.z / 1.6) * 1.6 + 0.8, 4.8, 45.6);
+          float bow = smoothstep(5.0, 0.5, abs(u_bowZ - cz)) * 0.6;
+          vec3 hq = vec3(abs(P.x) - 3.9, P.y - u_cheer * abs(sin(u_time * 7.0 + cz * 1.7 + sign(P.x) * 2.0)) * 0.22, P.z - cz) - vec3(-0.06 - bow * 0.35, 1.6 - bow * 0.42, 0.0);
+          alb = mix(alb, vec3(0.02), step(length(vec2(abs(hq.z) - 0.12, hq.y - 0.06)), 0.035) * step(hq.x, -0.1));
+          alb = mix(alb, vec3(0.08, 0.04, 0.03), step(hq.x, -0.42) * step(abs(hq.z), 0.07) * step(abs(hq.y + 0.06), 0.04));
+        }
+      } else if(m < 8.5){
+        // white marble steps with a gilded nosing, the carpet running up the middle
+        float tr = 1.0 - smoothstep(0.0, 0.035, 0.2 - mod(P.y + 0.001, 0.2));
+        alb = mix(vec3(0.88, 0.84, 0.78) * (0.92 + 0.1 * noise(P.xz * 4.0)), GOLD, tr);
+        if(abs(P.x) < 1.6) alb = mix(vec3(0.55, 0.04, 0.08), GOLD, tr);
+        gloss = 0.45;
+      } else if(m < 9.5){
+        vec3 tq = P - vec3(0.0, 0.6, 54.95);
+        bool cushion = (abs(tq.y - 0.6) < 0.06 && abs(tq.x) < 0.8) || (tq.z < 0.56 && abs(tq.x) < 0.7 && tq.y > 0.8 && tq.y < 2.8);
+        alb = cushion ? vec3(0.62, 0.05, 0.1) : GOLD;
+        gloss = cushion ? 0.1 : 1.0;
+      } else if(m < 10.5){
+        vec3 aq = P - u_arch; float ca = cos(u_archA), sa = sin(u_archA);
+        vec3 q = vec3(ca * aq.x - sa * aq.z, aq.y, sa * aq.x + ca * aq.z) / AS;
+        alb = vec3(0.95, 0.93, 0.87); gloss = 0.15;
+        if(q.y < 1.82){
+          // the cope opens in front over the alb; gold orphreys along its edges, a gold hem
+          float open = step(0.0, q.z) * smoothstep(0.17, 0.13, abs(q.x)) * smoothstep(1.5, 1.2, q.y);
+          alb = mix(vec3(0.62, 0.05, 0.1) * (0.85 + 0.15 * noise(q.xy * 30.0)), alb, open);
+          alb = mix(alb, GOLD, smoothstep(0.035, 0.0, abs(abs(q.x) - 0.18)) * step(0.0, q.z) * step(q.y, 1.5));
+          alb = mix(alb, GOLD, smoothstep(0.1, 0.06, q.y) + smoothstep(0.035, 0.0, abs(q.y - 1.42)) * step(q.z, 0.0));
+          float cr = max(abs(q.x) - 0.022, abs(q.y - 0.9) - 0.12);
+          cr = min(cr, max(abs(q.x) - 0.08, abs(q.y - 0.94) - 0.022));
+          alb = mix(alb, GOLD, smoothstep(0.01, 0.0, cr) * step(0.0, q.z));
+          gloss = 0.3;
+        } else {
+          // the mitre: white silk, a gold band, a gold stripe and a gold cross on the front
+          float mc = min(max(abs(q.x) - 0.018, abs(q.y - 2.42) - 0.08), max(abs(q.x) - 0.06, abs(q.y - 2.44) - 0.018));
+          alb = mix(alb, GOLD, smoothstep(0.03, 0.0, abs(q.x)) * step(q.z, 0.0) + smoothstep(0.035, 0.0, abs(q.y - 2.24)) + smoothstep(0.008, 0.0, mc) * step(0.0, q.z));
+          gloss = 0.45;
+        }
+      } else if(m < 11.5){
+        alb = GOLD; emis += vec3(1.0, 0.75, 0.4) * (0.4 + 2.0 * u_lights);
+      } else if(m < 12.5){ alb = GOLD; gloss = 1.0; }
+      else if(m < 13.5){ alb = vec3(0.8, 0.04, 0.12); gloss = 1.0; emis += vec3(0.4, 0.0, 0.05) * 0.3; }
+      else if(m < 14.5){ alb = vec3(0.96, 0.94, 0.9); gloss = 0.7; }
+      else if(m < 15.5){ alb = vec3(0.72, 0.07, 0.13); gloss = 0.25; }
+      else if(m < 16.5){
+        // velvet: soft folds, a gold fringe along the canopy
+        alb = vec3(0.52, 0.04, 0.08) * (0.7 + 0.3 * sin(P.z * 9.0 + P.x * 9.0));
+        alb = mix(alb, GOLD, smoothstep(0.05, 0.0, abs(P.y - 4.72)) + step(4.86, P.y) * step(abs(P.y - 4.9), 0.05));
+        gloss = 0.1;
+      } else {
+        // sleeves: red velvet, gold cuffs, white gloves
+        float dh = min(length(P - u_hdL), length(P - u_hdR));
+        alb = dh < 0.062 ? vec3(0.95, 0.93, 0.88) : (dh < 0.12 ? GOLD : vec3(0.6, 0.05, 0.1));
+        gloss = 0.3;
+      }
+      // light: candlelit ambience, chandeliers overhead, the sun through the windows
+      float sun = shaft(P + n * 0.05) * max(dot(n, SUN), 0.0);
+      vec3 amb = mix(vec3(0.08, 0.06, 0.05), vec3(0.42, 0.33, 0.24), u_lights) * (0.6 + 0.4 * n.y);
+      vec3 chq = vec3(0.0, 10.2, 6.0 * clamp(floor(P.z / 6.0 + 0.5), 1.0, 8.0)) - P;
+      float chl = u_lights * 22.0 / (1.0 + dot(chq, chq) * 0.25) * max(dot(n, normalize(chq)) * 0.5 + 0.5, 0.0);
+      // a soft fill from where you stand, as on a film set, so faces never go black
+      float fill = max(dot(n, -rd), 0.0) * 0.32 * u_lights * smoothstep(14.0, 2.0, t);
+      vec3 col = alb * (amb * ao + vec3(1.0, 0.72, 0.42) * chl * ao + vec3(1.0, 0.86, 0.62) * sun * 2.4 * (0.2 + 0.8 * u_lights) + vec3(1.0, 0.84, 0.64) * fill) + emis;
+      vec3 r = reflect(rd, n);
+      if(gloss > 0.0){
+        float sp = pow(max(dot(r, SUN), 0.0), 40.0) * shaft(P + n * 0.05) + pow(max(dot(r, normalize(chq)), 0.0), 30.0) * u_lights * 0.6;
+        bool goldy = (m > 11.5 && m < 12.5) || (m == 9.0 && gloss > 0.9) || (m > 3.5 && m < 4.5 && gloss > 0.8);
+        col += (goldy ? GOLD : vec3(1.0)) * sp * gloss * 2.0;
+        col += (goldy ? GOLD * 0.35 : vec3(0.0)) * (0.5 + 0.5 * r.y) * gloss;
+      }
+      // dust in the sunbeams
+      float vol = 0.0;
+      float tm = min(t, 60.0);
+      float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5);
+      for(int i = 0; i < 26 + ZERO; i++){
+        float s = (float(i) + jit) / 26.0 * tm;
+        vec3 q = ro + rd * s;
+        vol += shaft(q) * (0.7 + 0.6 * noise(q.xz * 1.5 + q.y + u_time * 0.2));
+      }
+      col += vec3(1.0, 0.82, 0.55) * vol / 26.0 * tm * 0.022 * (0.25 + 0.75 * u_lights);
+      col = mix(col, vec3(0.16, 0.12, 0.1) * u_lights, 1.0 - exp(-t * 0.012));
+      // golden petals once the crown is on
+      if(u_cheer > 0.01){
+        vec2 p = gl_FragCoord.xy / u_res.y;
+        for(int L = 0; L < 3 + ZERO; L++){
+          float fl = float(L);
+          float S = 9.0 + fl * 6.0;
+          vec2 g = vec2(p.x + sin(u_time * 0.6 + fl + p.y * 2.0) * 0.04, p.y + u_time * (0.06 + fl * 0.03)) * S;
+          vec2 id = floor(g); vec2 f = fract(g) - 0.5;
+          float hh = fract(sin(dot(id + fl * 7.0, vec2(127.1, 311.7))) * 43758.5);
+          if(hh > u_cheer * 0.35) continue;
+          float an = u_time * (2.0 + hh * 4.0) + hh * 20.0;
+          vec2 dv = f - (vec2(fract(hh * 13.0), fract(hh * 29.0)) - 0.5) * 0.5;
+          dv = vec2(cos(an) * dv.x - sin(an) * dv.y, sin(an) * dv.x + cos(an) * dv.y);
+          float pe = length(dv / vec2(0.12, 0.05 + 0.04 * abs(sin(an))));
+          col = mix(col, (hh > 0.5 ? GOLD : vec3(0.85, 0.08, 0.18)) * (0.8 + 0.4 * abs(sin(an))), smoothstep(1.0, 0.7, pe));
+        }
+      }
+      col += vec3(1.0, 0.86, 0.55) * u_flash;
+      col = col / (1.0 + col * 0.35) * 1.25;
+      vec2 v = gl_FragCoord.xy / u_res - 0.5; col *= 1.0 - dot(v, v) * 0.9;
+      col += (fract(sin(dot(gl_FragCoord.xy + u_time, vec2(12.9898, 78.233))) * 43758.5) - 0.5) / 255.0;
+      fragColor = vec4(col, 1.0);
+    }
+  `,
+  setup(root){
+    const sub = `<div class="gkc-meta"><span class="gkc-rule"></span><span>шанс 1 / ${(100000000).toLocaleString('ru-RU')}</span><span class="gkc-rule"></span></div><div class="gkc-class">${rarityClassBadge('glokus_king')}</div>`;
+    root.innerHTML = `<div class="gkc">
+      <div class="gkc-old">${cineLetters('Глокус', 'gkc-old-name rn-font-playfair', 'color:#efd9ae')}</div>
+      <div class="gkc-new">${cineLetters('Глокус : Король Капибар', 'gkc-new-name rn-font-playfair')}</div>
+      <div class="gkc-crown"></div>${sub}</div>`;
+    return { root, el: root.querySelector('.gkc'), stage: 0 };
+  },
+  frame(gl, U, t){
+    let z = cineMix(-3, 47.6, cineSS(2.2, 8.0, t));
+    let y = 1.7 + (t > 2.2 && t < 8.0 ? 0.035 * Math.sin(t * 9.5) : 0);
+    const k1 = cineSS(8.0, 9.8, t);
+    z = cineMix(z, 52.6, k1); y = cineMix(y, 2.3, k1);
+    const k2 = cineSS(9.8, 11.3, t);
+    z = cineMix(z, 54.45, k2); y = cineMix(y, 1.95, k2);
+    let yaw = Math.PI * k2 + (t > 14 ? 0.05 * Math.sin((t - 14) * 0.6) : 0);
+    // you look up at the crown as it rises and comes toward you, then bow your head a little as
+    // it's set on it, face to face with the archbishop
+    let pitch = -0.04 * (1 - k2) - 0.02 + 0.24 * cineSS(11.3, 12.3, t) + 0.18 * cineSS(12.5, 13.1, t) - 0.44 * cineSS(13.55, 14.1, t) + 0.06 * cineSS(14.2, 15.0, t);
+    const V3 = (a, b, k)=> [cineMix(a[0], b[0], k), cineMix(a[1], b[1], k), cineMix(a[2], b[2], k)];
+    // the archbishop: waits by the carpet, stands before the throne to raise the crown, comes
+    // up to you to set it on your head, then steps aside
+    const A0 = [-1.35, 0.6, 52.7, Math.PI / 2], A1 = [0, 0.6, 51.9, 0], A1b = [0, 0.6, 53.55, 0], A2 = [-1.6, 0.6, 53.0, 0.5];
+    const ka = cineSS(10.0, 11.4, t), kc = cineSS(12.4, 13.2, t), kb = cineSS(13.75, 15.4, t);
+    const A = [0, 1, 2, 3].map(i=> cineMix(cineMix(cineMix(A0[i], A1[i], ka), A1b[i], kc), A2[i], kb));
+    const f = [Math.sin(A[3]), 0, Math.cos(A[3])], r = [Math.cos(A[3]), 0, -Math.sin(A[3])];
+    // a point in his own frame (at his size, AS in the shader)
+    const AS = 0.72;
+    const at = (x, y, zf)=> [A[0] + (r[0] * x + f[0] * zf) * AS, A[1] + y * AS, A[2] + (r[2] * x + f[2] * zf) * AS];
+    // the crown: at his chest, raised high, brought to you, onto your head
+    const rest = at(0, 1.38, 0.38), high = at(0, 2.75, 0.45), over = [0.0, 2.45, 53.78], on = [0.0, 2.13, 54.45];
+    const c = V3(V3(V3(rest, high, cineSS(11.4, 12.4, t)), over, cineSS(12.5, 13.2, t)), on, cineSS(13.25, 13.65, t));
+    // raised high, the crown leans toward you so you see its jewels, not its lining
+    gl.uniform1f(U('u_ctilt'), -0.6 * cineSS(11.6, 12.4, t) * (1 - cineSS(13.15, 13.5, t)));
+    // his hands hold it until it's on, then go back to his sides
+    const free = cineSS(13.7, 14.4, t);
+    const hand = (s)=> V3([c[0] + r[0] * 0.2 * s, c[1] - 0.04, c[2] + r[2] * 0.2 * s], at(0.3 * s, 1.05, 0.12), free);
+    const hL = hand(-1), hR = hand(1), sL = at(-0.27, 1.62, 0.03), sR = at(0.27, 1.62, 0.03);
+    gl.uniform3f(U('u_ro'), 0, y, z);
+    gl.uniform2f(U('u_look'), yaw, pitch);
+    gl.uniform3f(U('u_crown'), c[0], c[1], c[2]);
+    gl.uniform3f(U('u_arch'), A[0], A[1], A[2]);
+    gl.uniform1f(U('u_archA'), A[3]);
+    gl.uniform3f(U('u_shL'), sL[0], sL[1], sL[2]); gl.uniform3f(U('u_shR'), sR[0], sR[1], sR[2]);
+    gl.uniform3f(U('u_hdL'), hL[0], hL[1], hL[2]); gl.uniform3f(U('u_hdR'), hR[0], hR[1], hR[2]);
+    gl.uniform1f(U('u_lights'), cineSS(0.2, 2.8, t));
+    gl.uniform1f(U('u_flash'), (t > 13.65 ? 0.9 * Math.exp(-(t - 13.65) * 2.6) : 0) + (t > 16.9 ? 0.5 * Math.exp(-(t - 16.9) * 3.5) : 0));
+    gl.uniform1f(U('u_cheer'), cineSS(13.8, 14.8, t));
+    gl.uniform1f(U('u_bowZ'), t < 9 ? z : -100);
+  },
+  dom(t, st, flash){
+    const stage = t < 14.3 ? 0 : t < 16.0 ? 1 : t < 16.9 ? 2 : t < 17.8 ? 3 : t < 19.2 ? 4 : 5;
+    if(stage !== st.stage){
+      st.stage = stage;
+      st.el.className = 'gkc gkc-s' + stage;
+      if(stage === 3){ flash.classList.remove('cf-go'); void flash.offsetWidth; flash.classList.add('cf-go'); }
+    }
+  },
+  sound(at){
+    at(0.05, A=>{ A.fx.impact(0.35, 1.3); A.fx.noise(2.6, 'lowpass', 320, 60, 0.7, 0.18); });
+    for(let i = 0; i < 10; i++) at(2.5 + i * 0.58, A=> A.fx.noise(0.12, 'lowpass', 900, 220, 0.8, 0.045));
+    at(8.4, A=> A.fx.noise(0.9, 'bandpass', 420, 1500, 1.2, 0.05));
+    at(10.9, A=> A.fx.swell(2.7, 0.24));
+    at(13.62, A=>{ A.fx.impact(0.6, 1.0); A.fx.shimmer(587, 0.12); A.fx.braam(0.24, 3.4, 49); });
+    at(13.9, A=>{ [[620, 980], [820, 1250], [1050, 760], [480, 700], [1400, 1100]].forEach(([a, b], i)=> A.fx.noise(2.6 + i * 0.3, 'bandpass', a, b, 1.6, 0.22 * (0.55 - i * 0.07), i * 0.05, 'pink')); });
+    at(15.8, A=> A.fx.riser(1.1, 0.28));
+    at(16.9, A=>{ A.fx.impact(0.85, 1.25); A.fx.shimmer(784, 0.14); A.fx.braam(0.3, 4.2, 41.2); });
+  }
+};
+
+// ------------------------------------------------------------
+// ГОРИЗОНТ СОБЫТИЙ — «Появление». Deep space, quiet. Something in the middle of the stars
+// eats their light and bends the ones around it into a ring. Then the disk ignites from
+// the inside out, the far side of it arches over the shadow, the photon ring snaps into
+// a thin line of light, the camera dives in along the disk, the jets fire, a flare and a
+// shockwave run out of the hole — and the name comes out of the dark.
+// ------------------------------------------------------------
+CINE.demo_super = {
+  duration: 20,
+  music: 'cine_horizon',
+  frag: CINE_HEAD + `
+    uniform vec3 u_ro; uniform vec3 u_fw; uniform vec3 u_rt; uniform vec3 u_up;
+    uniform float u_ign; uniform float u_jet; uniform float u_flare; uniform float u_shockT; uniform float u_stars; uniform float u_shake; uniform float u_mass; uniform float u_birthT;
+    float hash3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+    float pnoise(vec2 p, float per){
+      vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      float x0 = mod(i.x, per), x1 = mod(i.x + 1.0, per);
+      return mix(mix(hash(vec2(x0, i.y)), hash(vec2(x1, i.y)), f.x), mix(hash(vec2(x0, i.y + 1.0)), hash(vec2(x1, i.y + 1.0)), f.x), f.y);
+    }
+    float plasma(vec2 q){
+      float v = 0.0, a = 0.5, per = 14.0;
+      for(int i = 0; i < 4; i++){ v += a * pnoise(q, per); q = q * 2.0 + vec2(0.0, 17.3); per *= 2.0; a *= 0.5; }
+      float fil = 1.0 - abs(2.0 * pnoise(q * 0.25 * vec2(2.0, 3.0), 28.0) - 1.0);
+      return v * 0.75 + fil * fil * fil * 0.55;
+    }
+    vec3 space(vec3 d){
+      vec3 c = vec3(0.0015, 0.001, 0.004);
+      float band = d.y * 1.8 + 0.4 * sin(d.x * 1.6 + d.z * 0.7);
+      float bandK = exp(-band * band * 1.6);
+      float n1 = fbm(d.xz * 2.2 + d.y * 1.5);
+      float dust = smoothstep(0.42, 0.68, fbm(d.xy * 5.5 + d.z * 2.0 + 2.0));
+      // the galaxy behind it: violet and ember clouds, blue star-forming knots, a warm core
+      float n2 = fbm(d.zy * 3.1 - d.x * 1.2 + 7.0);
+      vec3 neb = vec3(0.32, 0.1, 0.55) * n1 * n1 * 1.3 + vec3(0.9, 0.35, 0.1) * smoothstep(0.55, 0.85, n1) * 0.6 + vec3(0.12, 0.35, 0.85) * smoothstep(0.52, 0.8, n2) * 0.45;
+      c += neb * bandK * (1.0 - dust * 0.85) * 1.05;
+      c += vec3(1.0, 0.72, 0.45) * exp(-band * band * 7.0) * smoothstep(0.35, 0.9, n1) * (1.0 - dust * 0.7) * 0.22;
+      for(int k = 0; k < 3; k++){
+        float fk = float(k);
+        float S = k == 0 ? 260.0 : (k == 1 ? 120.0 : 46.0);
+        vec3 g = d * S; vec3 id = floor(g);
+        float h = hash3(id + fk * 13.0);
+        float thr = k == 0 ? 0.972 - bandK * 0.045 : (k == 1 ? 0.986 : 0.995);
+        if(h > thr){
+          vec3 f = fract(g) - 0.5 - (vec3(hash3(id + 3.0), hash3(id + 5.0), hash3(id + 7.0)) - 0.5) * 0.5;
+          float r = length(f);
+          vec3 sc = mix(mix(vec3(1.0, 0.66, 0.42), vec3(0.62, 0.78, 1.0), hash3(id + 1.0)), vec3(1.0), 0.4);
+          c += sc * (smoothstep(0.09, 0.0, r) * 2.0 + exp(-r * 14.0) * 0.3 * fk) * (h - thr) / (1.0 - thr) * (1.1 + fk * 1.4);
+        }
+      }
+      return c;
+    }
+    vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+    void main(){
+      vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
+      uv += vec2(sin(u_time * 91.0), cos(u_time * 77.0)) * u_shake * 0.012;
+      vec3 dir = normalize(u_fw * 1.5 + u_rt * uv.x + u_up * uv.y);
+      vec3 pos = u_ro;
+      // the hole appears: its mass grows from nothing, the shadow opens and space starts to bend
+      float M = max(u_mass, 0.002);
+      float inner = 3.0, outer = 30.0;
+      vec3 col = vec3(0.0); float alpha = 0.0, captured = 0.0;
+      vec3 ring = vec3(0.0);
+      float sAge = u_time - u_shockT;
+      float shockR = (sAge > 0.0 && sAge < 8.0) ? sAge * 14.0 : -100.0;
+      float shockK = (sAge > 0.0 && sAge < 8.0) ? exp(-sAge * 0.35) : 0.0;
+      // the birth: a gravitational wave racing out of the hole the instant it appears
+      float bAge = u_time - u_birthT;
+      float birthR = (bAge > 0.0 && bAge < 6.0) ? bAge * 24.0 : -100.0;
+      float birthK = (bAge > 0.0 && bAge < 6.0) ? exp(-bAge * 0.9) : 0.0;
+      float p1 = fract(u_time / 20.0), p2 = fract(u_time / 20.0 + 0.5);
+      float wa = 1.0 - abs(2.0 * p1 - 1.0);
+      for(int i = 0; i < 260 + ZERO; i++){
+        float r = length(pos);
+        if(r < M){ alpha = 1.0; captured = 1.0; break; }
+        if(r > 140.0) break;
+        float hstep = clamp(0.05 * r, 0.02, 2.4);
+        vec3 Lm = cross(pos, dir);
+        dir = normalize(dir - 1.5 * M * dot(Lm, Lm) * pos / (r * r * r * r * r) * hstep);
+        if(shockK > 0.0){ float sb = r - shockR; dir = normalize(dir + normalize(pos) * exp(-sb * sb * 2.0) * shockK * 0.05 * hstep); }
+        if(birthK > 0.0){ float bw = r - birthR; dir = normalize(dir + normalize(pos) * exp(-bw * bw * 0.35) * birthK * 0.07 * hstep); }
+        vec3 np = pos + dir * hstep;
+        float fade = 1.0 - alpha;
+        if(birthK > 0.0) col += vec3(0.7, 0.8, 1.0) * exp(-abs(r - birthR) * 2.2) * birthK * hstep * 0.05 * fade;
+        ring += vec3(1.0, 0.82, 0.6) * exp(-abs(r - 1.5 * M) * 30.0 / M) * hstep * (0.25 + 1.4 * u_ign) * fade;
+        float rxz = length(pos.xz);
+        float haze = exp(-abs(pos.y) * 3.0) * smoothstep(outer, inner, rxz) * smoothstep(inner * 0.7, inner, rxz);
+        col += vec3(1.0, 0.45, 0.16) * haze * hstep * 0.009 * u_ign * (1.0 + u_flare * 2.0) * fade;
+        if(shockK > 0.0) col += vec3(1.0, 0.86, 0.7) * exp(-abs(r - shockR) * 1.6) * shockK * hstep * 0.09 * fade;
+        float ay = abs(pos.y);
+        if(rxz < 3.0 && ay > M && ay < 70.0 && u_jet > 0.0){
+          float wj = 0.14 + ay * 0.05;
+          float core = exp(-rxz * rxz / (wj * wj));
+          float flow = noise(vec2(rxz * 5.0, ay * 0.6 - u_time * 6.0));
+          float reach = smoothstep(u_jet * 70.0, u_jet * 70.0 - 8.0, ay);
+          col += vec3(0.45, 0.65, 1.0) * core * (0.3 + 0.7 * flow) * exp(-ay * 0.04) * smoothstep(M, M * 3.0, ay) * reach * (1.0 + u_flare * 3.0) * hstep * 0.3 * fade;
+        }
+        if(pos.y * np.y < 0.0){
+          vec3 cp = mix(pos, np, pos.y / (pos.y - np.y));
+          float rr = length(cp.xz);
+          if(rr > inner && rr < outer){
+            float x = (rr - inner) / (outer - inner);
+            float a = atan(cp.z, cp.x);
+            float om = 2.2 / (rr * sqrt(rr));
+            float lr = log(rr);
+            float ua = fract((a - om * p1 * 20.0) / 6.2831853);
+            float ub = fract((a - om * p2 * 20.0) / 6.2831853 + 0.37);
+            float pl = mix(plasma(vec2(ub * 14.0, lr * 26.0 + 9.1)), plasma(vec2(ua * 14.0, lr * 26.0)), wa);
+            float temp = inner / rr;
+            float e = (0.02 + 1.3 * pl * pl * pl) * pow(temp, 0.5) * smoothstep(0.0, 0.02, x) * smoothstep(1.0, 0.6, x);
+            e *= 1.0 + 2.5 * smoothstep(0.55, 1.0, temp);
+            // ignition: the disk lights up from its inner edge outward
+            float ign = smoothstep(u_ign * (outer + 6.0) + 0.5, u_ign * (outer + 6.0) - 4.0, rr);
+            e *= ign;
+            vec3 bb = mix(vec3(1.0, 0.26, 0.05), vec3(1.0, 0.55, 0.18), smoothstep(0.15, 0.5, temp));
+            bb = mix(bb, vec3(1.0, 0.93, 0.8), smoothstep(0.55, 1.0, temp) * (0.6 + 0.4 * pl));
+            e += exp(-abs(rr - u_ign * (outer + 6.0)) * 0.8) * step(u_ign, 0.99) * 1.4 * u_ign;
+            if(shockK > 0.0) e += exp(-abs(rr - shockR) * 1.2) * shockK * 2.5;
+            vec3 vel = normalize(vec3(-cp.z, 0.0, cp.x));
+            float dop = 1.0 + 0.8 * dot(vel, -dir);
+            bb = mix(bb, vec3(0.8, 0.9, 1.0) * 1.15, clamp((dop - 1.1) * 1.3, 0.0, 0.65));
+            bb = mix(bb, vec3(0.75, 0.12, 0.04), clamp((0.95 - dop) * 1.2, 0.0, 0.5));
+            e *= clamp(0.38 + 0.62 * dop * dop * dop, 0.35, 2.2) * (1.0 + u_flare * 1.6);
+            col += bb * e * 1.35 * fade;
+            alpha += clamp(e * 0.9, 0.0, 0.94) * fade;
+            if(alpha > 0.97) break;
+          }
+        }
+        pos = np;
+      }
+      col += ring * (1.0 - captured);
+      if(captured < 0.5) col += space(dir) * (1.0 - alpha) * u_stars;
+      if(sAge > 0.0 && sAge < 1.5) col += vec3(1.0, 0.92, 0.85) * exp(-sAge * 5.0) * 1.2;
+      if(bAge > 0.0 && bAge < 1.5) col += vec3(0.85, 0.9, 1.0) * exp(-bAge * 5.5) * 1.6;
+      // an anamorphic streak across the frame through the hole, flaring with the burst
+      col += vec3(1.0, 0.68, 0.4) * exp(-abs(uv.y) * 110.0) * exp(-abs(uv.x) * 1.4) * (0.04 * u_ign + 0.9 * u_flare);
+      col = aces(col);
+      vec2 v = gl_FragCoord.xy / u_res - 0.5; col *= 1.0 - dot(v, v) * 0.8;
+      col += (hash(gl_FragCoord.xy + fract(u_time * 7.0)) - 0.5) * (1.5 / 255.0);
+      fragColor = vec4(col, 1.0);
+    }
+  `,
+  setup(root, info){
+    const nm = String(info.name || '').replace(/^Демо\s*·\s*/, '').replace(/<[^>]*>/g, '') || 'Горизонт событий';
+    root.innerHTML = `<div class="ehc"><div class="ehc-name">${cineLetters(nm.toUpperCase(), 'ehc-letters')}</div>
+      <div class="ehc-sub">${info.id.indexOf('demo_') === 0 ? 'демо-тема' : ''} · ${rarityClassBadge(info.id)}</div></div>`;
+    return { el: root.querySelector('.ehc'), stage: 0 };
+  },
+  frame(gl, U, t){
+    const norm = (v)=>{ const n = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / n, v[1] / n, v[2] / n]; };
+    // far out while it appears, in close as the disk lights, a low swoop along the disk, then back
+    let R = cineMix(62, 38, cineSS(0, 7, t));
+    R = cineMix(R, 17, cineSS(7, 15, t));
+    R = cineMix(R, 30, cineSS(15.5, 20, t));
+    let h = cineMix(6, 3.6, cineSS(0, 7, t));
+    h = cineMix(h, 1.4, cineSS(7, 15, t));
+    h = cineMix(h, 3.8, cineSS(15.5, 20, t));
+    const phi = 0.3 + 0.9 * cineSS(5, 16, t) + t * 0.012;
+    const ro = [R * Math.cos(phi), h, R * Math.sin(phi)];
+    const toHole = norm([-ro[0], -ro[1], -ro[2]]);
+    const tang = [-Math.sin(phi), 0, Math.cos(phi)];
+    const ahead = 0.16 * cineSS(9, 13, t) * (1 - cineSS(15.5, 19, t));
+    const f = norm([toHole[0] + tang[0] * ahead, toHole[1] + 0.03 + tang[1] * ahead, toHole[2] + tang[2] * ahead]);
+    let rt = norm([f[2], 0, -f[0]]);
+    let up = [f[1] * rt[2] - f[2] * rt[1], f[2] * rt[0] - f[0] * rt[2], f[0] * rt[1] - f[1] * rt[0]];
+    // the camera banks into the swoop
+    const roll = 0.2 * cineSS(8, 13, t) * (1 - cineSS(15.5, 19.5, t)), cr = Math.cos(roll), sr = Math.sin(roll);
+    [rt, up] = [[rt[0] * cr + up[0] * sr, rt[1] * cr + up[1] * sr, rt[2] * cr + up[2] * sr], [up[0] * cr - rt[0] * sr, up[1] * cr - rt[1] * sr, up[2] * cr - rt[2] * sr]];
+    // empty space for two seconds, then the hole is simply there
+    gl.uniform1f(U('u_mass'), 0.002 + 0.998 * cineSS(2.2, 2.38, t));
+    gl.uniform1f(U('u_birthT'), 2.2);
+    gl.uniform3f(U('u_ro'), ro[0], ro[1], ro[2]);
+    gl.uniform3f(U('u_fw'), f[0], f[1], f[2]);
+    gl.uniform3f(U('u_rt'), rt[0], rt[1], rt[2]);
+    gl.uniform3f(U('u_up'), up[0], up[1], up[2]);
+    gl.uniform1f(U('u_ign'), cineSS(6.8, 9.6, t));
+    gl.uniform1f(U('u_jet'), cineSS(10.2, 11.8, t));
+    gl.uniform1f(U('u_flare'), t > 15.1 ? 1.6 * Math.exp(-(t - 15.1) * 1.4) : 0);
+    gl.uniform1f(U('u_shockT'), 15.1);
+    gl.uniform1f(U('u_stars'), cineSS(0.0, 2.6, t));
+    gl.uniform1f(U('u_shake'), (t > 15.1 ? Math.exp(-(t - 15.1) * 1.6) : 0) + (t > 2.2 ? 1.4 * Math.exp(-(t - 2.2) * 1.8) : 0));
+  },
+  dom(t, st){
+    const stage = t < 16.8 ? 0 : t < 19.3 ? 1 : 2;
+    if(stage !== st.stage){ st.stage = stage; st.el.className = 'ehc ehc-s' + stage; }
+  },
+  sound(at){
+    // the roar builds out of nothing and peaks the instant the hole appears; then the blast,
+    // and the wave sweeping past you
+    at(0.95, A=> A.fx.roar(1.25, 0.9));
+    at(2.2, A=>{ A.fx.blast(1.0); A.fx.impact(1.0, 1.6); A.fx.sub(0.8); A.fx.braam(0.34, 4.6, 36.7); });
+    at(2.25, A=> A.fx.noise(2.6, 'bandpass', 4200, 70, 1.1, 0.4, 0, 'white'));
+    at(3.4, A=> A.fx.noise(1.8, 'lowpass', 900, 60, 0.8, 0.3));
+    at(6.9, A=>{ A.fx.impact(0.6, 1.3); A.fx.braam(0.3, 5, 36.7); });
+    at(10.1, A=> A.fx.roar(3.0, 0.4));
+    at(15.1, A=>{ A.fx.blast(0.7); A.fx.impact(0.8, 1.2); });
+    at(16.9, A=>{ A.fx.shimmer(330, 0.1); A.fx.braam(0.2, 3.2, 41.2); });
+  }
+};
+
+setTimeout(()=>{ try{ Cinema.prewarm(); }catch(e){} }, 9000);
 
 // ------------------------------------------------------------
 // ФРУКТОВЫЙ : ДРАКОНИЙ ФРУКТ — a fresh slice, edge to edge. Magenta flesh
@@ -10968,6 +13114,2694 @@ V2_SHADERS.dragon_fruit = function(id){
       gl.uniform3f(U('u_drop'), drop[0], drop[1], drop[2]);
     },
     down: (e, s, layer)=>{ const u = uvOf(e); drop[0] = u[0]; drop[1] = u[1]; drop[2] = layer.now(); }
+  });
+};
+
+// ============================================================
+// DEMO THEMES — one per class, admin only (Админка → Проверка).
+// Each follows its class budget from THEME_STANDARDS:
+//   Обычный    static CSS/SVG, zero cost
+//   Слабый     one composited drifting layer + the aura's symbol
+//   Неплохой   one low-res shader: one motif, one particle field, cursor light, tint HUD
+//   Нормальный one shader: two motifs, two particle depths, cursor + click, glass HUD, music
+//   Хороший+   a bespoke scene: one idea, the cursor does something, the click is an event
+// Shared craft rules: a 3-stop palette, atmospheric depth (far = hazier, bluer, flatter),
+// anti-aliased edges, a final grade (vignette + grain/dither), nothing louder than the
+// spin button.
+// ============================================================
+Object.keys(DEMO_THEMES).forEach(id=>{
+  const d = DEMO_THEMES[id];
+  ITEM_COLORS[id] = { fg: d.fg, bg: d.bg };
+});
+Object.assign(RARITY_NAME_STYLE, {
+  demo_common:     { color:'#8a6a3a' },
+  demo_weak:       { color:'#2b4c8c', suffix:' 🎐' },
+  demo_decent:     { color:'#ff6a3a', extraClass:'rn-glow' },
+  demo_normal:     { color:'#ffb46a', extraClass:'rn-font-playfair rn-glow' },
+  demo_good:       { color:'#ffb24a', extraClass:'rn-font-cinzel rn-glow' },
+  demo_very_good:  { color:'#ffcf8a', extraClass:'rn-font-playfair rn-glow' },
+  demo_super:      { color:'#ffb070', extraClass:'rn-font-cinzel rn-glow rn-pulse' },
+  demo_special:    { color:'#9fd8ff', extraClass:'rn-font-playfair rn-glow' }
+});
+// a DOM layer that is removed together with the theme
+function demoDom(el){
+  document.body.appendChild(el);
+  const prev = window._v2Teardown;
+  window._v2Teardown = ()=>{ if(prev) prev(); el.remove(); };
+  return el;
+}
+// the spin key nudges a scene (same idea as Сакура's "Стряхнуть лепестки")
+function demoOnSpin(fn){
+  const sb = document.getElementById('spin-btn');
+  if(!sb) return ()=>{};
+  sb.addEventListener('click', fn);
+  return ()=> sb.removeEventListener('click', fn);
+}
+const DEMO_GRADE = `
+  vec3 demoGrade(vec3 col, vec2 uv, float k){
+    vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * k;
+    return col + (hash(gl_FragCoord.xy + fract(u_time * 7.0)) - 0.5) * (1.5 / 255.0);
+  }
+`;
+const r2GLSL = `vec2 r2(vec2 v, float a){ float c = cos(a), s = sin(a); return vec2(c * v.x - s * v.y, s * v.x + c * v.y); }`;
+
+// ------------------------------------------------------------
+// ГЛОКУС : КОРОЛЬ КАПИБАР — the first СУПЕРСКИЙ aura. You are the king on a high palace
+// balcony (34 m up) at golden hour, at a real marble balustrade. Everything below is
+// traced in 3D: a vast square with a granite column crowned by the golden Capybara King,
+// a red carpet lined by guards in bearskins, thousands of capybaras in top hats and
+// crowns waving flags up at you; around it a 19th-century city to the horizon — pastel
+// facades with windows, balconies and cornices, mansard roofs with dormers and chimneys,
+// long golden-hour shadows, a tree-lined avenue through a triumphal arch to a river and
+// a bridge, a cathedral with a golden dome, a golden needle spire, a clock tower that
+// tells the real time, a balloon over the roofs. The cursor is your gaze: the crowd under
+// it cheers. A click rolls a cheer through the square; three fire «Королевский салют»:
+// fanfare, cannons on the roofs, fireworks over the city, doves, bells, confetti.
+//
+// Built to compile fast (on Windows WebGL becomes HLSL, and its compiler takes minutes over
+// one big shader): three small WebGL2 programs instead of one. GEO traces the scene and the
+// sun's shadows into a G-buffer, SHADE paints it, and the main program adds the balustrade,
+// the salute, the confetti and the grade. Loops are bounded by a uniform so nothing unrolls,
+// every intersection routine exists once, and all three link in the background: the
+// balcony and the sky appear at once, the city fades in when it is ready.
+// ------------------------------------------------------------
+V2_SHADERS.glokus_king = function(id){
+  const HEAD = '#version 300 es\n' + SHADER_PRECISION + 'precision highp int;\n' + SHADER_NOISE + FBM_GLSL + `
+    uniform vec2 u_res; uniform float u_time;
+    uniform vec2 u_ptr; uniform float u_ptrOn;
+    uniform vec4 u_wave0; uniform vec4 u_wave1;
+    uniform float u_spinAt; uniform float u_salute; uniform float u_dusk; uniform float u_flash;
+    uniform vec3 u_clock;
+    uniform vec4 u_fw[8];
+    uniform int u_zero;
+    uniform vec2 u_cam;
+    uniform float u_hq;
+    #define ZERO u_zero
+
+    float ASP, T, F, DUSK, SAL;
+    vec3 CFW, CRT, CUP;
+    vec2 W0, W1, CPW;
+    vec3 SUNC, SKYC;
+    const float CAMH = 34.0;
+    const float CC = 46.0;
+    const float CS = 1.75;
+    const vec3 LS = vec3(0.759, 0.379, -0.529);
+    const vec3 COLM = vec3(0.0, 0.0, 125.0);
+    const vec3 GOLD = vec3(1.0, 0.76, 0.3);
+
+    vec2 rot(vec2 v, float a){ float c = cos(a), s = sin(a); return vec2(c * v.x - s * v.y, s * v.x + c * v.y); }
+    float sdBox3(vec3 p, vec3 b){ vec3 q = abs(p) - b; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0); }
+    float sdEll2(vec2 p, vec2 r){ float k0 = length(p / r); float k1 = length(p / (r * r)); return k0 * (k0 - 1.0) / max(k1, 1e-5); }
+    float sdSeg(vec2 p, vec2 a, vec2 b){ vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h); }
+
+    // the king's head: yaw and pitch follow the mouse (u_cam), the balcony stays where it is
+    vec3 camRay(vec2 uv){
+      vec2 s = (uv - 0.5) * vec2(ASP, 1.0);
+      vec3 r = normalize(CRT * s.x + CUP * s.y + CFW * F);
+      if(abs(r.x) < 1e-4) r.x = 1e-4;
+      if(abs(r.y) < 1e-4) r.y = -1e-4;
+      return r;
+    }
+    float zcOf(vec3 P){ return dot(P - vec3(0.0, CAMH, 0.0), CFW); }
+    vec2 projP(vec3 P){ vec3 v = P - vec3(0.0, CAMH, 0.0); float zc = dot(v, CFW); return vec2(dot(v, CRT) / zc * F + 0.5 * ASP, dot(v, CUP) / zc * F + 0.5); }
+    vec2 groundFromUV(vec2 uv){
+      vec3 rd = camRay(uv);
+      float t = CAMH / -min(rd.y, -0.02);
+      return vec2(clamp(rd.x * t, -84.0, 84.0), clamp(rd.z * t, 12.0, 224.0));
+    }
+    vec3 confC(float h){
+      float k = fract(h * 7.31) * 4.0;
+      return k < 1.0 ? vec3(0.82, 0.08, 0.16) : (k < 2.0 ? vec3(1.0, 0.8, 0.3) : (k < 3.0 ? vec3(0.97, 0.95, 0.9) : vec3(0.16, 0.3, 0.78)));
+    }
+    vec3 skyGrad(vec3 rd){
+      float h = rd.y;
+      float side = 0.5 + 0.5 * dot(normalize(rd.xz + vec2(1e-4)), normalize(LS.xz));
+      vec3 hor = mix(vec3(1.0, 0.78, 0.66), vec3(1.0, 0.86, 0.6), side);
+      hor = mix(hor, vec3(0.98, 0.56, 0.44), DUSK * 0.8);
+      vec3 mid = mix(vec3(0.84, 0.8, 0.9), vec3(0.62, 0.48, 0.66), DUSK);
+      vec3 top = mix(vec3(0.38, 0.56, 0.86), vec3(0.14, 0.17, 0.4), DUSK);
+      vec3 c = mix(hor, mid, smoothstep(0.0, 0.16, h));
+      c = mix(c, top, smoothstep(0.12, 0.6, h));
+      return c + vec3(1.0, 0.7, 0.4) * side * side * side * exp(-max(h, 0.0) * 8.0) * 0.16;
+    }
+    // 0 nothing (the square, behind you, cathedral grounds), 1 city blocks, 2 a little park, 3 the river
+    float cellKind(vec2 c){
+      if(c.y < 0.0) return 0.0;
+      if(c.x >= -2.0 && c.x <= 1.0 && c.y <= 4.0) return 0.0;
+      if(c.y >= 9.0 && c.y <= 10.0) return 3.0;
+      if(c.y == 11.0 && (c.x == -4.0 || c.x == -3.0 || c.x == 3.0)) return 0.0;
+      if(hash(c * 1.37 + 0.5) < 0.07) return 2.0;
+      return 1.0;
+    }
+    // what stands in a crowd cell: 0 nobody, 1 a capybara, 2 a guard
+    float crowdKind(vec2 cell, vec2 cc){
+      float dCol = length(cc - COLM.xz);
+      if(abs(cc.x) > 84.0 || cc.y < 8.0 || cc.y > 226.0) return 0.0;
+      if(dCol < 15.6) return 0.0;
+      if(dCol < 17.4) return mod(cell.x + cell.y, 2.0) < 0.5 ? 2.0 : 0.0;
+      if(cc.y < COLM.z - 15.0){
+        if(abs(cc.x) < 3.6) return 0.0;
+        if(abs(abs(cc.x) - 4.375) < 0.5) return (mod(cell.y, 2.0) < 0.5 && cc.y > 14.0) ? 2.0 : 0.0;
+      }
+      if(hash(cell * 0.73 + 1.3) < 0.05) return 0.0;
+      return 1.0;
+    }
+    void setup(){
+      ASP = u_res.x / u_res.y;
+      T = u_time;
+      DUSK = u_dusk;
+      F = mix(0.95, 1.25, clamp((ASP - 0.6) / 1.0, 0.0, 1.0));
+      float pit = 0.14 + u_cam.y, yaw = u_cam.x;
+      CFW = vec3(sin(yaw) * cos(pit), -sin(pit), cos(yaw) * cos(pit));
+      CRT = vec3(cos(yaw), 0.0, -sin(yaw));
+      CUP = cross(CFW, CRT);
+      SUNC = mix(vec3(1.0, 0.82, 0.6) * 1.45, vec3(1.0, 0.56, 0.38) * 0.9, DUSK);
+      SKYC = mix(vec3(0.48, 0.55, 0.74), vec3(0.3, 0.28, 0.5), DUSK);
+      W0 = groundFromUV(u_wave0.xy); W1 = groundFromUV(u_wave1.xy); CPW = groundFromUV(u_ptr);
+      float sa = T - u_salute;
+      SAL = (sa > 0.0 && sa < 14.0) ? smoothstep(0.0, 1.2, sa) * (1.0 - smoothstep(9.0, 14.0, sa)) : 0.0;
+    }
+  `;
+
+  // ---------------- GEO: what every pixel sees, and whether the sun reaches it ----------------
+  const GEO = HEAD + `
+    layout(location = 0) out vec4 g0;
+    layout(location = 1) out vec4 g1;
+    layout(location = 2) out vec4 g2;
+
+    // the landmarks: 0 a box whose top leans in (a pyramid when it closes), 1 an ellipsoid, 2 an upright cylinder
+    // A: type, material, R (height of the leaning top), D (how far it leans in)
+    // B: box min / ellipsoid centre / cylinder base;  C: box max / ellipsoid radii / (radius, height, 0);  E: material data
+    const int NLM = 39;
+    const vec4 LA[39] = vec4[39](
+      vec4(0, 6, 1, 0), vec4(0, 10, 1, 0), vec4(2, 11, 0, 0), vec4(0, 12, 1, 0),
+      vec4(2, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0),
+      vec4(2, 9, 0, 0), vec4(2, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 9, 0, 0), vec4(1, 31, 0, 0),
+      vec4(0, 2, 1, 0), vec4(2, 12, 0, 0), vec4(1, 12, 0, 0),
+      vec4(0, 15, 1, 0), vec4(0, 7, 17, 5), vec4(0, 6, 1, 0),
+      vec4(0, 16, 1, 0), vec4(0, 16, 1, 0), vec4(2, 16, 0, 0), vec4(1, 17, 0, 0), vec4(2, 16, 0, 0), vec4(2, 12, 0, 0), vec4(1, 12, 0, 0),
+      vec4(0, 2, 5, 3), vec4(0, 15, 1, 0), vec4(0, 15, 1, 0), vec4(0, 15, 1, 0), vec4(0, 12, 68, 3.5), vec4(0, 12, 1, 0), vec4(1, 12, 0, 0), vec4(1, 12, 0, 0)
+    );
+    const vec3 LB[39] = vec3[39](
+      vec3(-6.5, 0, 118.5), vec3(-4.5, 1, 120.5), vec3(0, 6.5, 125), vec3(-2.6, 38, 122.4),
+      vec3(0, 39.6, 125), vec3(0, 42.7, 125.1), vec3(0, 42.3, 125.8), vec3(0, 45.1, 124.75), vec3(0, 44.8, 123.9), vec3(-0.72, 45.9, 125), vec3(0.72, 45.9, 125),
+      vec3(0, 45.95, 124.8), vec3(2.05, 43.4, 124.4), vec3(2.05, 48.2, 124.4), vec3(1.55, 44.3, 124.5), vec3(-1.2, 42.8, 123.7), vec3(-1.3, 43.2, 124.3), vec3(0, 46.85, 124.6),
+      vec3(-11, 12.5, 236), vec3(0, 25.4, 241), vec3(0, 27.8, 241),
+      vec3(-104, 0, 230), vec3(-104, 44, 230), vec3(-11, 2, 414),
+      vec3(-170, 0, 522), vec3(-152, 0, 513), vec3(-138, 30, 540), vec3(-138, 48, 540), vec3(-138, 68, 540), vec3(-138, 78, 540), vec3(-138, 87, 540),
+      vec3(150, 0, 547), vec3(163, 0, 533), vec3(165, 38, 535), vec3(166.5, 50, 536.5), vec3(166.5, 58, 536.5), vec3(-5.7, 37.45, 122.25), vec3(-5.85, 37.6, 122.45), vec3(5.85, 37.6, 122.45)
+    );
+    const vec3 LC[39] = vec3[39](
+      vec3(6.5, 1, 131.5), vec3(4.5, 6.5, 129.5), vec3(2.2, 31.5, 0), vec3(2.6, 39.6, 127.6),
+      vec3(2.1, 0.6, 0), vec3(1.5, 2.15, 1.3), vec3(2.0, 2.8, 0.9), vec3(1.0, 1.0, 1.1), vec3(0.68, 0.58, 0.64), vec3(0.28), vec3(0.28),
+      vec3(0.82, 0.7, 0), vec3(0.11, 4.6, 0), vec3(0.34), vec3(0.38, 0.75, 0.38), vec3(0.48), vec3(0.35, 0.55, 0.35), vec3(0.22),
+      vec3(11, 25.4, 270), vec3(2.6, 1.5, 0), vec3(1.1),
+      vec3(-94, 44, 240), vec3(-94, 61, 240), vec3(11, 4.5, 506),
+      vec3(-106, 30, 558), vec3(-124, 26, 522), vec3(19, 18, 0), vec3(21), vec3(3.6, 10, 0), vec3(0.5, 8, 0), vec3(1.3),
+      vec3(190, 23, 600), vec3(177, 38, 547), vec3(175, 50, 545), vec3(173.5, 58, 543.5), vec3(173.5, 126, 543.5), vec3(5.7, 37.75, 122.65), vec3(0.32), vec3(0.32)
+    );
+    const vec4 LE[39] = vec4[39](
+      vec4(0.5, 0, 0, 0), vec4(0), vec4(0), vec4(0),
+      vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0),
+      vec4(0.25, 21, -11, 236), vec4(0), vec4(0),
+      vec4(0), vec4(0.3, 0, 0, 0), vec4(0.6, 0, 0, 0),
+      vec4(0), vec4(1, 0, 0, 0), vec4(2, 0, 0, 0), vec4(0), vec4(3, 0, 0, 0), vec4(0), vec4(0),
+      vec4(0.25, 18, 150, 547), vec4(1, 0, 0, 0), vec4(1, 0, 0, 0), vec4(1, 0, 0, 0), vec4(0), vec4(0), vec4(0), vec4(0)
+    );
+    // one capybara (local frame, facing -z, feet at the origin): body, head, muzzle, ears, eyes
+    const vec3 KPC[7] = vec3[7](vec3(0, 0.5, 0.12), vec3(0, 0.92, -0.42), vec3(0, 0.84, -0.67), vec3(0.17, 1.15, -0.32), vec3(-0.17, 1.15, -0.32), vec3(0.16, 1.0, -0.62), vec3(-0.16, 1.0, -0.62));
+    const vec3 KPR[7] = vec3[7](vec3(0.42, 0.42, 0.62), vec3(0.27, 0.28, 0.31), vec3(0.2, 0.17, 0.17), vec3(0.075), vec3(0.075), vec3(0.05), vec3(0.05));
+    const float KPM[7] = float[7](20.0, 20.0, 21.0, 30.0, 30.0, 22.0, 22.0);
+    // a guard: red coat, head, muzzle, bearskin
+    const vec3 GPC[4] = vec3[4](vec3(0, 0.85, 0), vec3(0, 1.58, -0.08), vec3(0, 1.5, -0.3), vec3(0, 2.1, -0.04));
+    const vec3 GPR[4] = vec3[4](vec3(0.36, 0.62, 0.32), vec3(0.24, 0.25, 0.27), vec3(0.17, 0.14, 0.14), vec3(0.27, 0.46, 0.27));
+    const float GPM[4] = float[4](28.0, 20.0, 21.0, 29.0);
+
+    void clipH(vec3 N, float c, vec3 ro, vec3 rd, inout float tn, inout float tf, inout vec3 nn){
+      float den = dot(N, rd);
+      float t = (c - dot(N, ro)) / den;
+      if(den < 0.0){ if(t > tn){ tn = t; nn = N; } } else { tf = min(tf, t); }
+    }
+    float iFrust(vec3 ro, vec3 rd, vec3 a, vec3 b, float R, float D, out vec3 n){
+      float tn = -1e9, tf = 1e9; vec3 nn = vec3(0.0, 1.0, 0.0);
+      float H = b.y - R, k = D / R;
+      clipH(vec3(-1.0, 0.0, 0.0), -a.x, ro, rd, tn, tf, nn);
+      clipH(vec3(1.0, 0.0, 0.0), b.x, ro, rd, tn, tf, nn);
+      clipH(vec3(0.0, 0.0, -1.0), -a.z, ro, rd, tn, tf, nn);
+      clipH(vec3(0.0, 0.0, 1.0), b.z, ro, rd, tn, tf, nn);
+      clipH(vec3(0.0, 1.0, 0.0), b.y, ro, rd, tn, tf, nn);
+      clipH(vec3(0.0, -1.0, 0.0), -a.y, ro, rd, tn, tf, nn);
+      clipH(vec3(-1.0, k, 0.0), -a.x + k * H, ro, rd, tn, tf, nn);
+      clipH(vec3(1.0, k, 0.0), b.x + k * H, ro, rd, tn, tf, nn);
+      clipH(vec3(0.0, k, -1.0), -a.z + k * H, ro, rd, tn, tf, nn);
+      clipH(vec3(0.0, k, 1.0), b.z + k * H, ro, rd, tn, tf, nn);
+      n = normalize(nn);
+      if(tn > tf || tn < 0.0) return -1.0;
+      return tn;
+    }
+    float iEll(vec3 ro, vec3 rd, vec3 c, vec3 r){
+      vec3 oc = (ro - c) / r, d = rd / r;
+      float a = dot(d, d), b = dot(oc, d), k = dot(oc, oc) - 1.0;
+      float h = b * b - a * k;
+      if(h < 0.0) return -1.0;
+      float t = (-b - sqrt(h)) / a;
+      return t > 0.0 ? t : -1.0;
+    }
+    float iCylY(vec3 ro, vec3 rd, vec3 base, float r, float h, out vec3 n){
+      vec2 oc = ro.xz - base.xz; vec2 d = rd.xz;
+      float a = dot(d, d), b = dot(oc, d), c = dot(oc, oc) - r * r;
+      float disc = b * b - a * c;
+      n = vec3(0.0, 1.0, 0.0);
+      if(disc < 0.0) return -1.0;
+      float t = (-b - sqrt(disc)) / a;
+      float y = ro.y + rd.y * t - base.y;
+      if(t > 0.0 && y >= 0.0 && y <= h){ vec2 q = oc + d * t; n = vec3(q.x / r, 0.0, q.y / r); return t; }
+      if(rd.y < 0.0){
+        float tc = (base.y + h - ro.y) / rd.y;
+        vec2 q = ro.xz + rd.xz * tc - base.xz;
+        if(tc > 0.0 && dot(q, q) < r * r) return tc;
+      }
+      return -1.0;
+    }
+    float TQ; vec3 NQ; float MQ; vec4 DQ;
+    void hitAny(int ty, vec3 ro, vec3 rd, vec3 a, vec3 b, float R, float D, float m, vec4 d){
+      vec3 n = vec3(0.0, 1.0, 0.0); float t;
+      if(ty == 0) t = iFrust(ro, rd, a, b, R, D, n);
+      else if(ty == 1){
+        t = iEll(ro, rd, a, b);
+        if(t > 0.0){ vec3 p = ro + rd * t; n = normalize((p - a) / (b * b)); if(m == 17.0 && p.y < 47.5) t = -1.0; }
+      } else t = iCylY(ro, rd, a, b.x, b.y, n);
+      if(t > 0.0 && t < TQ){ TQ = t; NQ = n; MQ = m; DQ = d; }
+    }
+    struct Cell { float kind; vec2 c0; vec2 mnA; vec2 mxA; vec2 mnB; vec2 mxB; float sA; float sB; float hA; float hB; float hs; bool single; bool grand; bool avenue; int nk; };
+    Cell makeCell(vec2 cell, float lod){
+      Cell C;
+      C.kind = cellKind(cell);
+      C.c0 = cell * CC;
+      C.avenue = (cell.x == -1.0 || cell.x == 0.0) && cell.y >= 5.0 && cell.y <= 8.0;
+      vec2 mn = C.c0 + 6.0, mx = C.c0 + CC - 6.0;
+      if(C.avenue){ if(cell.x == -1.0) mx.x = C.c0.x + CC - 11.0; else mn.x = C.c0.x + 11.0; }
+      C.hs = hash(cell + 0.31);
+      C.grand = cell.y == 5.0 && cell.x >= -2.0 && cell.x <= 1.0;
+      C.single = C.grand || lod > 0.9;
+      float sp = mix(0.35, 0.65, hash(cell + 3.1));
+      C.mnA = mn; C.mxA = mx; C.mnB = mn; C.mxB = mx;
+      if(!C.single){ if(C.hs > 0.5){ C.mxA.x = mix(mn.x, mx.x, sp); C.mnB.x = C.mxA.x; } else { C.mxA.y = mix(mn.y, mx.y, sp); C.mnB.y = C.mxA.y; } }
+      C.sA = C.grand ? 0.25 : hash(cell * 1.7 + 4.2); C.sB = hash(cell * 2.3 + 9.1);
+      C.hA = C.grand ? 21.0 : 17.0 + C.sA * 7.0; C.hB = 17.0 + C.sB * 7.0;
+      C.nk = 0;
+      if(C.kind > 0.5 && C.kind < 1.5) C.nk = lod > 0.9 ? 1 : 8;
+      if((C.kind > 1.5 && C.kind < 2.5) || C.avenue) C.nk = lod > 0.9 ? C.nk : 14;
+      return C;
+    }
+    // the k-th thing standing in the cell; false when there is none
+    bool cellPrim(Cell C, vec2 cell, int k, float lod, out int ty, out vec3 a, out vec3 b, out float R, out float D, out float m, out vec4 d){
+      ty = 0; a = vec3(0.0); b = vec3(1.0); R = 1.0; D = 0.0; m = 0.0; d = vec4(0.0);
+      if(k >= 8){
+        int i = k - 8;
+        if(C.kind > 1.5 && C.kind < 2.5){
+          float fi = float(i);
+          vec2 tp = C.c0 + (vec2(hash(cell + fi * 1.7), hash(cell + fi * 2.3 + 0.4)) * 0.7 + 0.15) * CC;
+          float r = 4.5 + 1.5 * hash(cell + fi * 3.1);
+          ty = 1; a = vec3(tp.x, r + 2.5, tp.y); b = vec3(r); m = 5.0; d = vec4(a, r);
+          return true;
+        }
+        if(C.avenue && i < 4){
+          ty = 1; a = vec3(cell.x < -0.5 ? -7.0 : 7.0, 6.8, C.c0.y + 5.75 + float(i) * 11.5); b = vec3(4.0); m = 5.0; d = vec4(a, 4.0);
+          return true;
+        }
+        return false;
+      }
+      if(C.kind < 0.5 || C.kind > 1.5) return false;
+      if(k == 0){ a = vec3(C.mnA.x, 0.0, C.mnA.y); b = vec3(C.mxA.x, C.hA + 4.4, C.mxA.y); R = 4.4; D = 2.0; m = 2.0; d = vec4(C.sA, C.hA, C.mnA); return true; }
+      if(k == 1){ if(C.single) return false; a = vec3(C.mnB.x, 0.0, C.mnB.y); b = vec3(C.mxB.x, C.hB + 4.4, C.mxB.y); R = 4.4; D = 2.0; m = 2.0; d = vec4(C.sB, C.hB, C.mnB); return true; }
+      if(k < 6){
+        if(lod > 0.5) return false;
+        bool second = k >= 4;
+        if(second && C.single) return false;
+        vec2 bmn = second ? C.mnB : C.mnA, bmx = second ? C.mxB : C.mxA;
+        float hh = second ? C.hB : C.hA;
+        float f = (k == 2 || k == 4) ? 0.23 : 0.79;
+        vec2 cc = (bmn + bmx) * 0.5;
+        bool alongX = (bmx.x - bmn.x) > (bmx.y - bmn.y);
+        vec2 cp = alongX ? vec2(mix(bmn.x, bmx.x, f), cc.y) : vec2(cc.x, mix(bmn.y, bmx.y, f));
+        vec3 hsz = alongX ? vec3(0.55, 1.3, 1.5) : vec3(1.5, 1.3, 0.55);
+        vec3 b0 = vec3(cp.x, hh + 5.5, cp.y);
+        a = b0 - hsz; b = b0 + hsz; m = 4.0; d = vec4(second ? C.sB : C.sA, hh, b.y, 0.0);
+        return true;
+      }
+      if(C.hs < 0.91 || C.grand) return false;
+      vec2 mn = C.c0 + 6.0;
+      if(k == 6){ a = vec3(mn.x + 1.0, 0.0, mn.y + 1.0); b = vec3(mn.x + 10.0, 33.0, mn.y + 10.0); m = 6.0; d = vec4(C.hs); return true; }
+      float sh = 17.0 + 10.0 * hash(cell + 8.0);
+      a = vec3(mn.x + 1.0, 33.0, mn.y + 1.0); b = vec3(mn.x + 10.0, 33.0 + sh, mn.y + 10.0); R = sh; D = 4.5; m = 7.0; d = vec4(C.hs);
+      return true;
+    }
+    // walk the city grid along the ray; in the shadow pass only a few cells toward the sun
+    void traceCity(vec3 ro, vec3 rd, int pass){
+      if(rd.y > -0.0003 && pass == 0) return;
+      if(pass == 1 && ro.y > 31.5) return;
+      float tc = pass == 1 ? 0.0 : max((CAMH - 32.0) / max(-rd.y, 1e-4), 0.0);
+      vec3 p = ro + rd * tc;
+      vec2 cell = floor(p.xz / CC);
+      vec2 sd = sign(rd.xz);
+      vec2 tD = abs(CC / rd.xz);
+      vec2 tM = ((cell + max(sd, 0.0)) * CC - ro.xz) / rd.xz;
+      int nCells = pass == 1 ? 5 : 64;
+      for(int i = 0; i < 64 + ZERO; i++){
+        if(i >= nCells || tc > TQ || tc > 2600.0) break;
+        if(pass == 1 && ro.y + rd.y * tc > 31.5) break;
+        float lod = pass == 1 ? 0.7 : (tc < mix(380.0, 900.0, u_hq) ? 0.0 : (tc < mix(900.0, 2200.0, u_hq) ? 0.7 : 1.0));
+        Cell C = makeCell(cell, lod);
+        for(int k = 0; k < 14 + ZERO; k++){
+          if(k >= C.nk) break;
+          int ty; vec3 a, b; float R, D, m; vec4 d;
+          if(!cellPrim(C, cell, k, lod, ty, a, b, R, D, m, d)) continue;
+          hitAny(ty, ro, rd, a, b, R, D, m, d);
+        }
+        float tn = min(tM.x, tM.y);
+        if(TQ < tn) break;
+        tc = tn;
+        if(tM.x < tM.y){ cell.x += sd.x; tM.x += tD.x; } else { cell.y += sd.y; tM.y += tD.y; }
+      }
+    }
+    // the landmarks, the lamps around the column and the balloon, through one loop
+    void traceLandmarks(vec3 ro, vec3 rd, int pass){
+      for(int i = 0; i < 57 + ZERO; i++){
+        int ty; vec3 a, b; float R = 1.0, D = 0.0, m; vec4 d = vec4(0.0);
+        if(i < NLM){
+          ty = int(LA[i].x); m = LA[i].y; R = LA[i].z; D = LA[i].w; a = LB[i]; b = LC[i]; d = LE[i];
+        } else if(i < NLM + 16){
+          int j = i - NLM;
+          float ang = float(j / 2) * 0.7854 + 0.39;
+          vec3 lp = vec3(cos(ang) * 13.0, 0.0, 125.0 + sin(ang) * 13.0);
+          if(j - (j / 2) * 2 == 0){ ty = 2; a = lp; b = vec3(0.16, 5.4, 0.0); m = 13.0; }
+          else { ty = 1; a = lp + vec3(0.0, 5.8, 0.0); b = vec3(0.45, 0.55, 0.45); m = 14.0; }
+        } else {
+          if(pass == 1) break;
+          vec3 bc = vec3(-170.0 + mod(T * 2.2, 380.0), 132.0 + 4.0 * sin(T * 0.2), 620.0);
+          if(i == NLM + 16){ ty = 1; a = bc; b = vec3(12.0, 14.0, 12.0); m = 18.0; d = vec4(bc, 0.0); }
+          else { ty = 0; a = bc + vec3(-2.2, -21.0, -2.2); b = bc + vec3(2.2, -18.0, 2.2); m = 19.0; }
+        }
+        hitAny(ty, ro, rd, a, b, R, D, m, d);
+      }
+      if(pass == 0){
+        // the royal banner hanging from the capital under the King, swallowtailed, swaying a little
+        float tf = (122.5 - ro.z) / rd.z;
+        vec3 fp = ro + rd * tf;
+        float fy = fp.y - 31.8;
+        float fx = fp.x + 5.2 + sin(T * 0.8 + fy * 0.4) * 0.09 * (5.8 - fy) / 5.8;
+        float bot = 0.9 * abs(fract(fx / 3.4667) - 0.5) * 2.0;
+        if(tf > 0.0 && tf < TQ && fx > 0.0 && fx < 10.4 && fy > bot && fy < 5.8){ TQ = tf; NQ = vec3(0.0, 0.0, -1.0); MQ = 32.0; DQ = vec4(fx, fy, 0.0, 0.0); }
+      }
+    }
+    float excite(vec2 xz, float h){
+      float e = 0.0;
+      float a0 = T - u_wave0.z;
+      if(a0 > 0.0 && a0 < 6.0){ float dd = length(xz - W0) - a0 * 32.0; e += exp(-dd * dd / 60.0) * u_wave0.w * exp(-a0 * 0.3); }
+      float a1 = T - u_wave1.z;
+      if(a1 > 0.0 && a1 < 6.0){ float dd = length(xz - W1) - a1 * 32.0; e += exp(-dd * dd / 60.0) * u_wave1.w * exp(-a1 * 0.3); }
+      float aS = T - u_spinAt;
+      if(aS > 0.0 && aS < 6.0){ float dd = xz.y - 10.0 - aS * 45.0; e += exp(-dd * dd / 90.0) * 0.55; }
+      e += SAL * (0.75 + 0.25 * sin(T * 3.0 + h * 10.0));
+      e += exp(-dot(xz - CPW, xz - CPW) / 170.0) * u_ptrOn * 0.65;
+      e += 0.38 * smoothstep(0.62, 0.8, noise(vec2(T * 0.35 + h * 37.0, h * 13.0)));
+      return clamp(e, 0.0, 1.2);
+    }
+    void traceCrowd(vec3 ro, vec3 rd){
+      if(rd.y > -0.004) return;
+      float tTop = (CAMH - 3.4) / -rd.y;
+      if(tTop > TQ) return;
+      float tBot = CAMH / -rd.y;
+      vec3 p = ro + rd * tTop;
+      if(p.z > 236.0) return;
+      vec2 cell = floor(p.xz / CS);
+      vec2 sd = sign(rd.xz);
+      vec2 tD = abs(CS / rd.xz);
+      vec2 tM = ((cell + max(sd, 0.0)) * CS - ro.xz) / rd.xz;
+      float tc = tTop;
+      for(int i = 0; i < 12 + ZERO; i++){
+        if(tc > TQ || tc > tBot) break;
+        vec2 cc = (cell + 0.5) * CS + (vec2(hash(cell + 7.7), hash(cell + 3.3)) - 0.5) * 0.24;
+        float kind = crowdKind(cell, cc);
+        if(kind > 0.5){
+          float h = hash(cell * 0.73 + 1.3);
+          bool guard = kind > 1.5;
+          float ex = guard ? 0.0 : excite(cc, h);
+          float hop = guard ? 0.0 : (0.02 + 0.6 * smoothstep(0.12, 1.0, ex)) * abs(sin(T * (6.0 + 3.0 * h) + h * 30.0));
+          vec2 f = normalize(-cc + vec2(0.0, -6.0));
+          float ang = atan(f.x, -f.y);
+          float sc = guard ? 1.0 : (0.88 + 0.22 * hash(cell + 5.5)) * (hash(cell + 8.8) > 0.92 ? 0.72 : 1.0);
+          vec3 lo = ro - vec3(cc.x, hop, cc.y);
+          lo.xz = rot(lo.xz, -ang); vec3 ld = rd; ld.xz = rot(ld.xz, -ang);
+          lo /= sc; ld /= sc;
+          float near = step(length(ro.xz - cc), mix(120.0, 320.0, u_hq));
+          float up = smoothstep(0.3, 0.7, ex);
+          float acc = hash(cell * 1.9 + 11.0);
+          float toss = 1.6 * smoothstep(0.65, 1.1, ex) * (0.5 + 0.5 * sin(T * 4.0 + h * 9.0));
+          float tL = TQ; vec3 nL = vec3(0.0, 1.0, 0.0); float mL = 0.0; vec3 hp = vec3(0.0);
+          for(int k = 0; k < 11 + ZERO; k++){
+            // pick the part: 1 ellipsoid, 2 cylinder, 3 flag
+            int ty = 0; vec3 c = vec3(0.0), r = vec3(1.0); float m = 0.0;
+            if(guard){
+              if(k < 4){ ty = 1; c = GPC[k]; r = GPR[k]; m = GPM[k]; }
+              else if(k == 4){ ty = 2; c = vec3(mix(0.38, 0.0, SAL), 0.55, mix(-0.12, -0.42, SAL)); r = vec3(0.035, 1.75, 0.0); m = 26.0; }
+            } else {
+              if(k < 7){ if(k < 5 || near > 0.5){ ty = 1; c = KPC[k]; r = KPR[k]; m = KPM[k]; } }
+              else if(k < 9){ if(up > 0.01){ ty = 1; c = vec3(k == 7 ? 0.36 : -0.36, 0.9 + 0.35 * up, -0.3); r = vec3(0.1, 0.16, 0.1); m = 20.0; } }
+              else if(acc < 0.17){ ty = 2; c = vec3(0.0, (k == 9 ? 1.12 : 1.1) + toss, -0.42); r = k == 9 ? vec3(0.17, 0.34, 0.0) : vec3(0.28, 0.03, 0.0); m = 23.0; }
+              else if(acc < 0.25){ if(k == 9){ ty = 2; c = vec3(0.0, 1.12, -0.42); r = vec3(0.16, 0.15, 0.0); m = 24.0; } }
+              else if(acc < 0.31){ ty = 1; c = vec3(k == 9 ? 0.1 : 0.24, 1.2, -0.36); r = vec3(0.09, 0.06, 0.05); m = 25.0; }
+              else if(acc < 0.47){ if(k == 9){ ty = 2; c = vec3(0.3, 0.3, -0.2); r = vec3(0.024, 2.2, 0.0); m = 26.0; } else { ty = 3; m = 27.0; } }
+            }
+            if(ty == 0) continue;
+            if(ty == 1){
+              float t = iEll(lo, ld, c, r);
+              if(t > 0.0 && t < tL){ tL = t; vec3 pp = lo + ld * t; nL = normalize((pp - c) / (r * r)); mL = m; hp = pp; }
+            } else if(ty == 2){
+              vec3 n; float t = iCylY(lo, ld, c, r.x, r.y, n);
+              if(t > 0.0 && t < tL){ tL = t; nL = n; mL = m; hp = lo + ld * t; }
+            } else {
+              float t = (-0.2 - lo.z) / ld.z;
+              vec3 fp = lo + ld * t;
+              float fx = fp.x - 0.3;
+              float fy = fp.y - 1.95 - sin(fx * 9.0 - T * 8.0 + h * 6.0) * 0.05 * fx / 0.55;
+              if(t > 0.0 && t < tL && fx > 0.0 && fx < 0.55 && fy > 0.0 && fy < 0.38){ tL = t; nL = vec3(0.0, 0.0, -1.0); mL = m; hp = vec3(fx, fy, 0.0); }
+            }
+          }
+          if(mL > 0.5 && tL < TQ){
+            TQ = tL; MQ = mL;
+            vec3 nw = nL; nw.xz = rot(nL.xz, ang);
+            NQ = normalize(nw);
+            DQ = vec4(h, hp);
+          }
+        }
+        float tn = min(tM.x, tM.y);
+        if(TQ < tn) break;
+        tc = tn;
+        if(tM.x < tM.y){ cell.x += sd.x; tM.x += tD.x; } else { cell.y += sd.y; tM.y += tD.y; }
+      }
+    }
+    void main(){
+      setup();
+      vec2 uv = gl_FragCoord.xy / u_res;
+      vec3 rd0 = camRay(uv);
+      // pass 0: what you see; pass 1: whether the sun reaches it
+      vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0); float M = 0.0; vec4 Dd = vec4(0.0); float tP = 1e6; float sunv = 1.0;
+      vec3 ro = vec3(0.0, CAMH, 0.0), rd = rd0;
+      for(int pass = 0; pass < 2 + ZERO; pass++){
+        TQ = 1e6; MQ = 0.0; NQ = vec3(0.0, 1.0, 0.0); DQ = vec4(0.0);
+        if(pass == 1){
+          if(M < 0.5 || dot(N, LS) <= 0.0) break;
+          ro = P + N * 0.08; rd = LS;
+        } else if(rd.y < 0.0){ TQ = CAMH / -rd.y; MQ = 1.0; }
+        traceLandmarks(ro, rd, pass);
+        traceCity(ro, rd, pass);
+        if(pass == 0){
+          traceCrowd(ro, rd);
+          tP = TQ; M = MQ; N = NQ; Dd = DQ; P = ro + rd * TQ;
+        } else sunv = TQ < 1e5 ? 0.0 : 1.0;
+      }
+      if(M > 0.5) sunv *= smoothstep(-4.0, 4.0, P.z - (40.0 - P.y) * 1.396);
+      g0 = vec4(tP, M, sunv, 0.0);
+      g1 = vec4(N * 0.5 + 0.5, 1.0);
+      g2 = Dd;
+    }
+  `;
+
+  // ---------------- SHADE: paint what GEO found ----------------
+  const SHADE = HEAD + `
+    uniform highp sampler2D u_g0;
+    uniform highp sampler2D u_g1;
+    uniform highp sampler2D u_g2;
+    out vec4 fragColor;
+    vec3 skyCol(vec3 rd){
+      vec3 c = skyGrad(rd);
+      float h = rd.y;
+      if(h > 0.0){
+        vec2 cq = rd.xz / (h + 0.06) * 0.42 + vec2(T * 0.004, 0.0);
+        float n = fbm(cq);
+        float n2 = fbm(cq * 2.6 + 4.0);
+        float body = smoothstep(0.52, 0.76, n * 0.8 + n2 * 0.34);
+        float lit = smoothstep(0.3, 0.8, n2 + (n - 0.5) * 0.4);
+        vec3 cc = mix(vec3(0.74, 0.62, 0.76), vec3(1.0, 0.92, 0.82), lit);
+        cc = mix(cc, vec3(1.0, 0.64, 0.56), DUSK * 0.6);
+        c = mix(c, cc, body * smoothstep(0.0, 0.1, h) * 0.85);
+        vec2 sg = rd.xy / (rd.z + 0.6) * 110.0; vec2 si = floor(sg);
+        float st = step(0.986, hash(si)) * smoothstep(0.08, 0.0, length(fract(sg) - 0.5 - (vec2(hash(si + 1.0), hash(si + 2.0)) - 0.5) * 0.6));
+        c += vec3(1.0, 0.95, 0.85) * st * smoothstep(0.38, 0.6, DUSK) * smoothstep(0.15, 0.4, h) * (1.0 - body) * 0.8;
+      }
+      return c;
+    }
+    // soft dark spots on the paving under every capybara (and its shadow, off toward the street)
+    float crowdShade(vec3 P){
+      if(abs(P.x) > 86.0 || P.z < 6.0 || P.z > 228.0) return 1.0;
+      float s = 1.0;
+      vec2 sdir = normalize(LS.xz);
+      for(int i = 0; i < 2 + ZERO; i++){
+        vec2 q = P.xz + sdir * float(i);
+        vec2 cell = floor(q / CS);
+        vec2 cc = (cell + 0.5) * CS + (vec2(hash(cell + 7.7), hash(cell + 3.3)) - 0.5) * 0.24;
+        if(crowdKind(cell, cc) > 0.5){
+          vec2 dv = P.xz - cc;
+          float d = i == 0 ? length(dv / vec2(0.55, 0.75)) : length((dv + sdir * 0.9) / vec2(0.6));
+          s *= 1.0 - (i == 0 ? 0.55 : 0.35) * smoothstep(1.0, 0.3, d);
+        }
+      }
+      return s;
+    }
+    // a stroke font for the standard: six letters in a 0.52 x 1 box
+    float arcD(vec2 p, vec2 c, vec2 r, float a0, float a1){
+      vec2 q = (p - c) / r;
+      float ang = atan(q.y, q.x);
+      if(ang < a0) ang += 6.2831853;
+      if(ang <= a1) return abs(length(q) - 1.0) * min(r.x, r.y);
+      return min(length(p - c - r * vec2(cos(a0), sin(a0))), length(p - c - r * vec2(cos(a1), sin(a1))));
+    }
+    float glyph(int k, vec2 p){
+      const float W = 0.52;
+      float d;
+      if(k == 0){
+        d = arcD(p, vec2(W * 0.5, 0.5), vec2(W * 0.5 - 0.07, 0.43), 0.62, 5.66);
+        d = min(d, sdSeg(p, vec2(W * 0.5, 0.44), vec2(W - 0.07, 0.44)));
+        d = min(d, sdSeg(p, vec2(W - 0.07, 0.44), vec2(W - 0.07, 0.2)));
+      } else if(k == 1){
+        d = min(sdSeg(p, vec2(0.08, 0.93), vec2(0.08, 0.07)), sdSeg(p, vec2(0.08, 0.07), vec2(W - 0.05, 0.07)));
+      } else if(k == 2){
+        vec2 r = vec2(W * 0.5 - 0.07, 0.43);
+        d = abs(length((p - vec2(W * 0.5, 0.5)) / r) - 1.0) * min(r.x, r.y);
+      } else if(k == 3){
+        d = min(sdSeg(p, vec2(0.08, 0.93), vec2(0.08, 0.07)), min(sdSeg(p, vec2(0.09, 0.42), vec2(W - 0.05, 0.93)), sdSeg(p, vec2(0.21, 0.55), vec2(W - 0.05, 0.07))));
+      } else if(k == 4){
+        d = min(sdSeg(p, vec2(0.05, 0.93), vec2(W * 0.5, 0.5)), min(sdSeg(p, vec2(W - 0.05, 0.93), vec2(W * 0.5, 0.5)), sdSeg(p, vec2(W * 0.5, 0.5), vec2(W * 0.5, 0.07))));
+      } else {
+        d = min(arcD(p, vec2(W * 0.5, 0.715), vec2(W * 0.5 - 0.07, 0.215), 0.45, 4.71), arcD(p, vec2(W * 0.5, 0.285), vec2(W * 0.5 - 0.07, 0.215), -2.69, 1.5708));
+      }
+      return d - 0.068;
+    }
+    vec3 wallPal(float s){
+      float k = fract(s * 5.3) * 6.0;
+      return k < 1.0 ? vec3(0.93, 0.86, 0.73) : (k < 2.0 ? vec3(0.96, 0.84, 0.55) : (k < 3.0 ? vec3(0.72, 0.84, 0.75) : (k < 4.0 ? vec3(0.93, 0.74, 0.7) : (k < 5.0 ? vec3(0.74, 0.8, 0.88) : vec3(0.9, 0.72, 0.5)))));
+    }
+    vec3 roofPal(float s){
+      float k = fract(s * 3.7) * 3.0;
+      return k < 1.6 ? vec3(0.46, 0.5, 0.57) : (k < 2.4 ? vec3(0.32, 0.5, 0.42) : vec3(0.56, 0.3, 0.24));
+    }
+    vec3 facade(vec3 P, vec3 n, vec4 d, float pix, inout vec3 emis, inout float glass){
+      float seed = d.x, H = d.y;
+      float u = abs(n.x) > 0.5 ? P.z - d.w : P.x - d.z;
+      float v = P.y;
+      vec3 base = wallPal(seed);
+      vec3 trim = vec3(0.97, 0.96, 0.92);
+      float det = clamp(1.7 - pix * 2.4, 0.0, 1.0);
+      float bu = (fract(u / 3.4) - 0.5) * 3.4;
+      float bi = floor(u / 3.4);
+      float wid = seed * 37.0 + n.x * 7.0 + n.z * 13.0;
+      vec3 col = base;
+      vec3 avg = mix(base, vec3(0.24, 0.26, 0.32), 0.3);
+      bool square = (n.z < -0.5 && P.z < 240.0 && abs(P.x) < 100.0) || (n.x > 0.5 && P.x < -90.0 && P.z < 236.0) || (n.x < -0.5 && P.x > 90.0 && P.z < 236.0);
+      if(v > H - 0.9){
+        col = trim * (0.92 + 0.12 * step(0.5, fract(u * 3.0)) * det * step(v, H - 0.4));
+        return col * (0.85 + 0.2 * smoothstep(H - 0.9, H, v));
+      }
+      col *= 1.0 - 0.3 * smoothstep(H - 1.6, H - 0.9, v);
+      if(v < 4.6){
+        col = base * 0.94 * (1.0 - 0.2 * smoothstep(0.06, 0.0, abs(fract(v / 0.58) - 0.5) - 0.43) * det);
+        float ax = bu / 1.25;
+        float arch = 3.3 + 0.55 * sqrt(max(0.0, 1.0 - ax * ax));
+        if(abs(bu) < 1.25 && v > 0.45 && v < arch){
+          col = mix(vec3(0.16, 0.12, 0.1), vec3(0.42, 0.3, 0.2), smoothstep(0.5, 3.0, v));
+          emis += vec3(1.0, 0.7, 0.36) * (0.1 + 0.6 * DUSK) * step(0.35, hash(vec2(bi, wid))) * det;
+          col = mix(col, trim, clamp(smoothstep(1.13, 1.25, abs(bu)) + smoothstep(arch - 0.13, arch, v), 0.0, 1.0) * det);
+        }
+        if(v > 4.3) col = mix(col, trim, det);
+        return mix(base * 0.62, col, det);
+      }
+      float fl = (v - 4.6) / 3.3;
+      float fi = floor(fl), fv = fract(fl);
+      col = mix(col, trim, smoothstep(0.05, 0.0, fv) * det * 0.9);
+      float wx = abs(bu);
+      if(wx < 0.8 && fv > 0.13 && fv < 0.87){
+        col = mix(col, trim, det);
+        if(wx < 0.64 && fv > 0.19 && fv < 0.81){
+          float gy = (fv - 0.5) / 0.31;
+          float lit = step(1.0 - (0.07 + DUSK * 0.6), hash(vec2(bi + fi * 31.0, wid)));
+          emis += vec3(1.0, 0.68, 0.34) * lit * smoothstep(0.1, 0.5, DUSK + 0.06) * 0.9 * det;
+          float mull = max(smoothstep(0.06, 0.0, abs(bu)), smoothstep(0.05, 0.0, abs(gy - 0.35))) * det;
+          col = mix(vec3(0.12, 0.13, 0.17), trim, mull);
+          glass = (1.0 - mull) * (1.0 - lit);
+          col *= 1.0 - 0.45 * smoothstep(0.55, 1.0, gy);
+          col *= 1.0 - 0.3 * smoothstep(0.4, 0.64, -bu * sign(n.x + n.z + 0.01));
+        }
+      }
+      if(fi > 0.5 && fi < 1.5 && fv > 0.87 && fv < 0.98 && wx < 1.0 - (fv - 0.87) * 5.0) col = mix(col, trim * 1.03, det);
+      if(((fi > 0.5 && fi < 1.5) || (fi > 3.5 && fi < 4.5)) && fv < 0.25){
+        float bar = smoothstep(0.35, 0.0, abs(fract(u * 4.0) - 0.5) * 2.0 - 0.5);
+        float rail = smoothstep(0.03, 0.0, abs(fv - 0.22));
+        col = mix(col, vec3(0.07, 0.07, 0.08), max(bar * det, rail) * 0.85);
+        col *= 1.0 - 0.32 * smoothstep(0.05, 0.0, fv);
+      }
+      if(square && mod(bi, 3.0) < 0.5){
+        float bx = bu + sin(v * 0.6 + T * 1.5) * 0.06;
+        float botB = H - 10.5 + 0.8 * (1.0 - abs(bx) / 1.1);
+        if(abs(bx) < 1.1 && v > botB && v < H - 1.0){
+          vec3 bn = vec3(0.62, 0.05, 0.1) * (0.72 + 0.4 * sin(bx * 6.0 + T * 1.1));
+          float edge = smoothstep(0.86, 0.96, abs(bx) / 1.1) + smoothstep(botB + 0.3, botB, v);
+          bn = mix(bn, GOLD, clamp(edge, 0.0, 1.0));
+          vec2 eq = vec2(bx, v - (H - 3.8));
+          bn = mix(bn, GOLD, smoothstep(0.66, 0.56, length(eq)) * smoothstep(0.34, 0.44, length(eq)));
+          bn = mix(bn, GOLD, smoothstep(0.32, 0.22, length(eq - vec2(0.0, 0.05))) * 0.9);
+          return mix(vec3(0.5, 0.08, 0.1), bn, det);
+        }
+      }
+      return mix(avg, col, det);
+    }
+    vec3 roofCol(vec3 P, vec3 n, vec4 d, float pix, inout vec3 emis){
+      float seed = d.x, H = d.y;
+      vec3 rc = roofPal(seed);
+      float det = clamp(1.7 - pix * 2.4, 0.0, 1.0);
+      if(n.y > 0.98){
+        float seam = step(0.5, fract(P.x * 1.3 + step(0.5, fract(P.z * 0.1)) * 0.5));
+        vec3 c = rc * (0.94 + 0.08 * seam * det);
+        vec2 sk = fract(P.xz / vec2(7.0, 5.0));
+        c = mix(c, vec3(0.35, 0.4, 0.48), step(0.82, sk.x) * step(0.75, sk.y) * det * step(0.5, hash(floor(P.xz / vec2(7.0, 5.0)))));
+        return c * 1.05;
+      }
+      float u = abs(n.x) > abs(n.z) ? P.z - d.w : P.x - d.z;
+      float ry = P.y - H;
+      float bu = (fract(u / 3.4) - 0.5) * 3.4;
+      vec3 c = rc * (0.9 + 0.1 * step(0.5, fract(u * 1.5)) * det);
+      c *= 0.9 + 0.1 * smoothstep(0.0, 4.4, ry);
+      if(abs(bu) < 0.62 && ry > 0.5 && ry < 2.7 - abs(bu) * 0.5){
+        vec3 dc = vec3(0.96, 0.95, 0.92);
+        if(abs(bu) < 0.42 && ry > 0.75 && ry < 2.0){
+          float lit = step(0.75 - DUSK * 0.4, hash(vec2(floor(u / 3.4), seed * 91.0 + n.x * 5.0 + n.z * 11.0)));
+          dc = vec3(0.14, 0.15, 0.2);
+          emis += vec3(1.0, 0.7, 0.36) * lit * smoothstep(0.15, 0.55, DUSK) * 0.8 * det;
+        }
+        c = mix(c, dc, det);
+      }
+      return mix(c, vec3(0.92, 0.9, 0.86), smoothstep(0.12, 0.0, ry) * det);
+    }
+    vec3 groundCol(vec3 P, float pix, out float water, out float ao){
+      water = 0.0; ao = 1.0;
+      float det = clamp(1.7 - pix * 2.0, 0.0, 1.0);
+      vec2 cell = floor(P.xz / CC);
+      float kind = cellKind(cell);
+      if(kind > 2.5){ water = 1.0; return vec3(0.1, 0.2, 0.26); }
+      vec3 c;
+      if(abs(P.x) < 97.0 && P.z > 0.0 && P.z < 236.0){
+        // granite slabs, pale rings and a sixteen-pointed star around the column, the red carpet
+        vec2 g = P.xz / 2.4;
+        vec2 f = abs(fract(g) - 0.5);
+        c = mix(vec3(0.7, 0.66, 0.61), vec3(0.62, 0.58, 0.55), hash(floor(g))) * (1.0 - 0.3 * smoothstep(0.44, 0.5, max(f.x, f.y)) * det);
+        vec2 mq = P.xz - COLM.xz;
+        float r = length(mq);
+        float band = smoothstep(0.9, 0.6, abs(r - 26.0)) + smoothstep(0.9, 0.6, abs(r - 46.0)) + smoothstep(1.4, 1.0, abs(r - 15.0));
+        float dA = abs(fract(atan(mq.y, mq.x) / 6.2831 * 16.0 + 0.5) - 0.5) * 6.2831 / 16.0 * r;
+        float spoke = smoothstep(0.7, 0.4, dA) * step(15.0, r) * step(r, 46.0);
+        c = mix(c, vec3(0.88, 0.85, 0.8), clamp(band + spoke, 0.0, 1.0) * 0.85);
+        if(abs(P.x) < 3.2 && P.z < COLM.z - 15.0){
+          float ex = abs(P.x);
+          c = vec3(0.6, 0.05, 0.09) * (0.9 + 0.12 * noise(P.xz * 3.0));
+          c = mix(c, GOLD * 0.9, smoothstep(2.75, 2.85, ex) * smoothstep(3.15, 3.05, ex));
+        }
+        ao = crowdShade(P);
+      } else {
+        // cobbled streets, pale pavements along the houses, darker deep in the street canyons
+        vec2 l = P.xz - cell * CC;
+        float edge = min(min(l.x, CC - l.x), min(l.y, CC - l.y));
+        vec2 g = P.xz * 2.2;
+        float cob = smoothstep(0.32, 0.5, max(abs(fract(g.x + step(0.5, fract(g.y * 0.5)) * 0.5) - 0.5), abs(fract(g.y) - 0.5))) * det;
+        c = mix(vec3(0.5, 0.47, 0.44), vec3(0.42, 0.4, 0.38), hash(floor(g))) * (1.0 - 0.25 * cob);
+        c = mix(c, vec3(0.72, 0.68, 0.62), smoothstep(3.2, 2.9, abs(edge - 4.5)));
+        if(kind > 1.5 && edge > 6.0) c = vec3(0.3, 0.42, 0.18) * (0.8 + 0.3 * noise(P.xz * 0.6));
+        if(kind < 0.5 && P.z > 500.0) c = vec3(0.74, 0.7, 0.64) * (0.9 + 0.1 * hash(floor(P.xz / 3.0)));
+        if(kind > 0.5) ao = 0.68 + 0.32 * smoothstep(6.0, 2.0, edge);
+      }
+      return c;
+    }
+    void main(){
+      setup();
+      vec2 uv = gl_FragCoord.xy / u_res;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      vec3 rd0 = camRay(uv);
+      ivec2 ip = ivec2(gl_FragCoord.xy);
+      vec4 ga = texelFetch(u_g0, ip, 0);
+      vec3 n = normalize(texelFetch(u_g1, ip, 0).xyz * 2.0 - 1.0);
+      vec4 Dd = texelFetch(u_g2, ip, 0);
+      float tP = ga.x, M = ga.y, sunv = ga.z;
+      vec3 P = vec3(0.0, CAMH, 0.0) + rd0 * tP;
+      vec3 col;
+      if(M < 0.5){
+        col = skyCol(rd0);
+        // pigeons circling high over the square
+        for(int i = 0; i < 7 + ZERO; i++){
+          float fi = float(i);
+          float a = T * (0.18 + 0.02 * fi) + fi * 0.9;
+          vec3 B = vec3(sin(a) * (40.0 + fi * 3.0), 62.0 + 5.0 * sin(T * 0.3 + fi), 170.0 + cos(a) * (36.0 + fi * 2.0));
+          float s = F / zcOf(B);
+          vec2 q = (p - projP(B)) / s;
+          if(dot(q, q) > 2.5) continue;
+          float flap = sin(T * 9.0 + fi * 2.0);
+          float d = min(sdSeg(q, vec2(0.0), vec2(-0.6, 0.3 * flap)), sdSeg(q, vec2(0.0), vec2(0.6, 0.3 * flap))) - 0.06;
+          float aa = 1.5 / (u_res.y * s);
+          col = mix(col, vec3(0.3, 0.27, 0.32), smoothstep(aa, -aa, d) * 0.8);
+        }
+      } else {
+        float pix = tP / (F * u_res.y) * 1.3;
+        vec3 alb = vec3(0.7); vec3 emis = vec3(0.0); float glass = 0.0; float gloss = 0.0; float ao = 1.0; float water = 0.0;
+        if(M < 1.5){
+          alb = groundCol(P, pix, water, ao);
+          float gz = exp(-dot(P.xz - CPW, P.xz - CPW) / 170.0) * u_ptrOn;
+          emis += vec3(1.0, 0.82, 0.5) * gz * 0.18 * alb;
+        } else if(M < 2.5){
+          if(n.y > 0.01) alb = roofCol(P, n, Dd, pix, emis);
+          else { alb = facade(P, n, Dd, pix, emis, glass); ao = 0.55 + 0.45 * smoothstep(0.0, 10.0, P.y); }
+        } else if(M < 4.5){
+          alb = mix(wallPal(Dd.x) * 0.9, vec3(0.7, 0.36, 0.24), step(Dd.z - 0.45, P.y));
+        } else if(M < 5.5){
+          float leaf = noise(P.xz * 0.9 + P.y * 0.7) * 0.6 + noise(P.xy * 2.3 + P.z) * 0.4;
+          alb = mix(vec3(0.1, 0.22, 0.07), vec3(0.34, 0.5, 0.16), leaf);
+          n = normalize(n + (vec3(noise(P.xz * 1.3), noise(P.yz * 1.3), noise(P.xy * 1.3)) - 0.5) * 1.2);
+          ao = 0.55 + 0.45 * smoothstep(-0.6, 0.6, (P.y - Dd.y) / max(Dd.w, 0.5));
+        } else if(M < 6.5){
+          alb = vec3(0.86, 0.82, 0.74) * (0.92 + 0.08 * step(0.5, fract(P.y / 0.8)));
+        } else if(M < 7.5){
+          alb = Dd.x > 0.6 ? vec3(0.3, 0.52, 0.44) : vec3(0.34, 0.36, 0.42);
+          alb *= 0.9 + 0.1 * step(0.5, fract(P.y * 1.5));
+        } else if(M < 9.5){
+          alb = GOLD; gloss = 1.0;
+        } else if(M < 10.5){
+          alb = vec3(0.5, 0.26, 0.24) * (0.9 + 0.1 * noise(P.xy * 3.0));
+          alb = mix(alb, vec3(0.62, 0.45, 0.22), step(abs(P.y - 3.6), 1.4) * step(abs(P.x), 3.4) * 0.8);
+          gloss = 0.3;
+        } else if(M < 11.5){
+          alb = vec3(0.62, 0.4, 0.38) * (0.92 + 0.1 * noise(vec2(atan(n.z, n.x) * 6.0, P.y * 0.4)));
+          alb = mix(alb, GOLD * 0.8, smoothstep(0.25, 0.0, abs(P.y - 8.5)) + smoothstep(0.25, 0.0, abs(P.y - 36.8)));
+          gloss = 0.5;
+        } else if(M < 12.5){
+          alb = GOLD * 0.95; gloss = 1.0;
+        } else if(M < 13.5){
+          alb = vec3(0.06, 0.08, 0.07);
+        } else if(M < 14.5){
+          alb = vec3(0.9, 0.85, 0.7);
+          emis += vec3(1.0, 0.8, 0.45) * (0.2 + 1.6 * smoothstep(0.2, 0.5, DUSK));
+        } else if(M < 15.5){
+          alb = Dd.x > 0.5 ? vec3(0.96, 0.9, 0.7) : vec3(0.88, 0.8, 0.66);
+          alb *= 0.93 + 0.07 * step(0.5, fract(P.y / 0.8));
+          if(Dd.x < 0.5){
+            // the clock faces show the real time
+            vec2 cq = abs(n.z) > 0.5 ? vec2(P.x + 99.0, P.y - 37.0) : vec2(-(P.z - 235.0), P.y - 37.0);
+            float r = length(cq);
+            if(r < 3.4){
+              alb = vec3(0.97, 0.94, 0.86);
+              float ang = atan(cq.x, cq.y);
+              float tick = smoothstep(0.1, 0.0, abs(fract(ang / 6.2831 * 12.0 + 0.5) - 0.5) * 6.2831 / 12.0 * r) * step(2.5, r) * step(r, 3.1);
+              alb = mix(alb, vec3(0.1, 0.08, 0.07), tick);
+              float ha = u_clock.x * 6.2831, ma = u_clock.y * 6.2831;
+              float dh = sdSeg(cq, vec2(0.0), vec2(sin(ha), cos(ha)) * 1.7) - 0.14;
+              float dm = sdSeg(cq, vec2(0.0), vec2(sin(ma), cos(ma)) * 2.6) - 0.09;
+              alb = mix(alb, vec3(0.08, 0.06, 0.05), smoothstep(pix, -pix, min(dh, dm)));
+              alb = mix(alb, GOLD * 0.9, smoothstep(3.15, 3.25, r));
+            }
+          }
+        } else if(M < 16.5){
+          alb = vec3(0.9, 0.86, 0.78);
+          if(Dd.x > 0.5 && Dd.x < 1.5) alb *= mix(1.0, mix(0.5, 1.05, smoothstep(0.9, 0.3, abs(fract((P.x + 138.0) / 4.0 + 0.5) - 0.5) * 4.0)), step(3.0, P.y) * step(P.y, 22.0));
+          if(Dd.x > 1.5 && Dd.x < 2.5) alb *= 1.0 - 0.5 * step(0.5, fract(atan(n.z, n.x) / 6.2831 * 24.0)) * step(36.0, P.y) * step(P.y, 45.0);
+        } else if(M < 17.5){
+          alb = GOLD * (1.0 - 0.3 * smoothstep(0.06, 0.0, abs(fract(atan(n.z, n.x) / 6.2831 * 16.0 + 0.5) - 0.5))); gloss = 1.0;
+        } else if(M < 18.5){
+          vec3 lp = P - Dd.xyz;
+          alb = mix(vec3(0.72, 0.07, 0.13), vec3(1.0, 0.78, 0.3), step(0.5, fract(atan(lp.z, lp.x) / 6.2831 * 12.0)));
+        } else if(M < 19.5){
+          alb = vec3(0.45, 0.3, 0.16);
+        } else if(M > 31.5){
+          // the royal standard: crimson silk, a gold border and fringe, GLOKYS in gold
+          float fx = Dd.x, fy = Dd.y;
+          float rip = sin(fx * 1.4 - T * 3.2 + fy * 0.5);
+          alb = vec3(0.64, 0.05, 0.1) * (0.78 + 0.28 * rip);
+          float bd = min(min(fy - 0.9 * abs(fract(fx / 3.4667) - 0.5) * 2.0, 5.8 - fy), min(fx, 10.4 - fx));
+          alb = mix(alb, GOLD * (0.8 + 0.25 * rip), smoothstep(0.34, 0.24, bd) * smoothstep(0.06, 0.13, bd));
+          float L = 1e3;
+          for(int i = 0; i < 6 + ZERO; i++){
+            vec2 lp = vec2(fx - 0.62 - float(i) * 1.55, fy - 1.75) / 2.75;
+            if(lp.x > -0.15 && lp.x < 0.67 && lp.y > -0.15 && lp.y < 1.15) L = min(L, glyph(i, lp));
+          }
+          float pw = max(pix / 2.75 * 1.2, 0.006);
+          alb = mix(alb, vec3(0.22, 0.02, 0.04), smoothstep(pw + 0.04, 0.03, L) * 0.75);
+          alb = mix(alb, GOLD * (1.0 + 0.2 * rip), smoothstep(pw, -pw, L));
+          n = normalize(vec3(rip * 0.22, 0.05, -1.0));
+          gloss = 0.25;
+        } else {
+          // the people of the square
+          float h = Dd.x;
+          vec3 hp = Dd.yzw;
+          float tone = hash(vec2(h, 5.1));
+          vec3 fur = mix(vec3(0.6, 0.4, 0.22), vec3(0.42, 0.27, 0.15), tone);
+          fur = mix(fur, vec3(0.7, 0.52, 0.32), step(0.86, tone) * 0.6);
+          fur *= 0.88 + 0.24 * noise(hp.xy * vec2(30.0, 12.0) + h * 40.0);
+          alb = fur;
+          if(M > 20.5 && M < 21.5) alb = mix(fur * 0.72, vec3(0.08, 0.05, 0.04), smoothstep(0.05, 0.03, length(vec2(abs(hp.x) - 0.07, hp.y - 0.86))) * step(hp.z, -0.72));
+          else if(M < 22.5 && M > 21.5){ alb = vec3(0.03); gloss = 1.0; }
+          else if(M < 23.5 && M > 22.5) alb = mix(vec3(0.06, 0.05, 0.06), vec3(0.62, 0.06, 0.1), step(abs(hp.y - 1.17), 0.035));
+          else if(M < 24.5 && M > 23.5){ alb = GOLD; gloss = 1.0; }
+          else if(M < 25.5 && M > 24.5) alb = hash(vec2(h, 4.0)) > 0.5 ? vec3(1.0, 0.55, 0.72) : vec3(0.45, 0.7, 1.0);
+          else if(M < 26.5 && M > 25.5) alb = vec3(0.32, 0.2, 0.1);
+          else if(M < 27.5 && M > 26.5){
+            bool red = hash(vec2(h, 6.0)) > 0.5;
+            vec3 fc = mix(red ? vec3(0.78, 0.07, 0.14) : vec3(0.95, 0.74, 0.25), red ? GOLD : vec3(0.7, 0.06, 0.12), step(abs(hp.y - 0.19), 0.05));
+            alb = fc * (0.8 + 0.3 * sin(hp.x * 9.0 - T * 8.0));
+            n = normalize(vec3(sin(hp.x * 9.0 - T * 8.0) * 0.4, 0.2, -1.0));
+          }
+          else if(M < 28.5 && M > 27.5){
+            alb = mix(vec3(0.78, 0.06, 0.08), vec3(0.95), step(abs(hp.y - 0.62), 0.04));
+            alb = mix(alb, vec3(0.95), smoothstep(0.05, 0.03, abs(hp.y - 0.9 - hp.x * 1.2)) * step(hp.z, 0.0));
+          }
+          else if(M < 29.5 && M > 28.5) alb = vec3(0.05, 0.045, 0.05) * (0.7 + 0.6 * noise(hp.xy * vec2(30.0, 12.0)));
+          else if(M > 29.5) alb = fur * 0.6;
+          ao = 0.7 + 0.3 * smoothstep(0.0, 0.6, hp.y);
+        }
+        float dif = max(dot(n, LS), 0.0);
+        vec3 light = SUNC * dif * sunv + SKYC * (0.5 + 0.5 * n.y) * ao + vec3(0.28, 0.22, 0.17) * (0.5 - 0.5 * n.y) * ao * 0.8;
+        light += vec3(1.0, 0.8, 0.6) * u_flash * 0.35;
+        col = alb * light + emis;
+        vec3 r = reflect(rd0, n);
+        if(glass > 0.0) col = mix(col, skyGrad(r) * 0.85, (0.25 + 0.6 * pow(1.0 - max(dot(-rd0, n), 0.0), 3.0)) * glass);
+        if(gloss > 0.0){
+          vec3 env = mix(vec3(0.42, 0.28, 0.12), skyGrad(r) * 1.1, smoothstep(-0.3, 0.4, r.y));
+          col += (gloss > 0.9 ? GOLD * env : vec3(0.6) * env) * 0.35 * gloss * ao + SUNC * pow(max(dot(r, LS), 0.0), 30.0) * gloss * sunv;
+        }
+        if(water > 0.5){
+          vec3 wn = normalize(vec3(sin(P.x * 0.7 + T * 1.3) * 0.03, 1.0, sin(P.z * 0.5 - T) * 0.03));
+          col = mix(vec3(0.06, 0.14, 0.18), skyGrad(reflect(rd0, wn)), 0.75) * (0.85 + 0.15 * sunv);
+        }
+        col = mix(col, skyGrad(vec3(rd0.x, 0.015, rd0.z)) * vec3(0.98, 0.96, 0.97), (1.0 - exp(-tP * 0.00105)) * 0.92);
+      }
+      fragColor = vec4(clamp(col * 0.5, 0.0, 1.0), 1.0);
+    }
+  `;
+
+  // ---------------- the main program: the balustrade in front of you, the salute, the confetti ----------------
+  const FRAG = HEAD + `
+    uniform sampler2D u_col;
+    uniform float u_ready;
+    out vec4 fragColor;
+    vec3 BO;
+    float balD(vec3 q){
+      float d = sdBox3(q - vec3(0.0, 0.07, 0.0), vec3(80.0, 0.07, 0.2));
+      d = min(d, sdBox3(q - vec3(0.0, 0.985, 0.0), vec3(80.0, 0.04, 0.085)) - 0.018);
+      d = min(d, sdBox3(q - vec3(0.0, 0.92, 0.0), vec3(80.0, 0.02, 0.08)));
+      float pxd = abs(abs(q.x) - 0.95);
+      d = min(d, sdBox3(vec3(pxd, q.y - 0.5, q.z), vec3(0.13, 0.43, 0.16)));
+      float bx = mod(q.x + 0.12, 0.24) - 0.12;
+      float t = clamp((q.y - 0.14) / 0.72, 0.0, 1.0);
+      float g = (t - 0.3) / 0.17;
+      float r = 0.034 + 0.042 * exp(-g * g) + 0.024 * smoothstep(0.86, 0.97, t) + 0.028 * (1.0 - smoothstep(0.03, 0.1, t));
+      r -= 0.01 * smoothstep(0.55, 0.7, t) * (1.0 - smoothstep(0.7, 0.86, t));
+      float dB = max(length(vec2(bx, q.z)) - r, max(0.14 - q.y, q.y - 0.895));
+      if(pxd > 0.13) d = min(d, dB * 0.85);
+      return d;
+    }
+    bool balcony(vec3 ro, vec3 rd, out vec3 col){
+      col = vec3(0.0);
+      if(rd.y > -0.05) return false;
+      float tb = (BO.z - 0.18 - ro.z) / rd.z;
+      vec3 pb = ro + rd * tb - BO;
+      for(int s = 0; s < 2 + ZERO; s++){
+        float sd = s == 0 ? -1.0 : 1.0;
+        float lx = pb.x - sd * 0.95;
+        float hw = 0.17;
+        if(abs(lx) > hw) continue;
+        float bot = 0.06 + 0.13 * (1.0 - abs(lx) / hw);
+        if(pb.y < bot || pb.y > 1.045) continue;
+        float u = lx / hw;
+        float fold = 0.5 + 0.5 * sin(u * 8.0 + sin(T * 0.7 + sd) * 0.6 + pb.y * 2.0);
+        vec3 vel = mix(vec3(0.28, 0.02, 0.05), vec3(0.82, 0.07, 0.13), fold);
+        float f8 = fold * fold; f8 *= f8; f8 *= f8;
+        vel += vec3(0.7, 0.18, 0.2) * f8 * 0.35;
+        float bd = min(hw - abs(lx), (pb.y - bot) * 0.85);
+        vec3 gold = GOLD * (0.72 + 0.38 * fold);
+        vel = mix(vel, gold, smoothstep(0.022, 0.016, bd) * smoothstep(0.004, 0.008, bd));
+        vec2 eq = vec2(lx, pb.y - 0.62) / hw;
+        float ring = abs(length(eq) - 0.66) - 0.045;
+        float leaf = abs(length(eq) - 0.8) - 0.05 + 0.06 * abs(sin(atan(eq.y, eq.x) * 9.0));
+        vec2 hq = eq - vec2(0.0, -0.08);
+        vec2 hb = abs(hq) - vec2(0.08, 0.13);
+        float dh = length(max(hb, 0.0)) + min(max(hb.x, hb.y), 0.0) - 0.15;
+        float de = length(vec2(abs(hq.x) - 0.19, hq.y - 0.27)) - 0.065;
+        vec2 cq = eq - vec2(0.0, 0.3);
+        float cc4 = abs(cos(cq.x * 13.0)); cc4 *= cc4; cc4 *= cc4;
+        float dcr = max(abs(cq.x) - 0.2, max(-cq.y, cq.y - 0.1 - 0.1 * cc4));
+        vel = mix(vel, gold * 1.08, smoothstep(0.03, 0.0, min(ring, leaf)));
+        vel = mix(vel, gold, smoothstep(0.03, 0.0, min(min(dh, de), dcr)));
+        vel = mix(vel, vec3(0.3, 0.02, 0.05), smoothstep(0.035, 0.02, length(vec2(abs(hq.x) - 0.08, hq.y))) * step(dh, 0.0));
+        vel = mix(vel, GOLD * 1.05, smoothstep(0.011, 0.005, abs(pb.y - 1.033)));
+        col = vel * (SUNC * (0.5 + 0.5 * fold) * 0.9 + SKYC * 0.55 + vec3(1.0, 0.8, 0.6) * u_flash * 0.3);
+        return true;
+      }
+      float t0 = max((BO.z - 0.22 - ro.z) / rd.z, (BO.y + 1.05 - ro.y) / rd.y);
+      float t1 = min((BO.z + 0.22 - ro.z) / rd.z, (BO.y - ro.y) / rd.y);
+      if(t0 > t1) return false;
+      float t = t0; bool hit = false; float dl = 1.0;
+      for(int i = 0; i < 56 + ZERO; i++){
+        dl = balD(ro + rd * t - BO);
+        if(dl < 0.0007){ hit = true; break; }
+        t += dl;
+        if(t > t1) break;
+      }
+      if(!hit) return false;
+      vec3 q = ro + rd * t - BO;
+      const float e = 0.002;
+      vec3 n = normalize(vec3(balD(q + vec3(e, 0.0, 0.0)), balD(q + vec3(0.0, e, 0.0)), balD(q + vec3(0.0, 0.0, e))) - dl);
+      float vn = 1.0 - abs(2.0 * noise(q.xy * vec2(9.0, 14.0) + q.z * 6.0 + fbm(q.yx * 5.0 + q.z * 3.0) * 1.6) - 1.0);
+      vn *= vn; vn *= vn; vn *= vn; vn *= vn; vn *= vn;
+      vec3 alb = vec3(0.95, 0.93, 0.88) * (1.0 - vn * vec3(0.12, 0.13, 0.15));
+      alb *= 0.96 + 0.06 * noise(q.xy * 40.0);
+      float gl = smoothstep(0.012, 0.004, abs(q.z)) * step(1.02, q.y) + smoothstep(0.005, 0.0, abs(q.y - 0.95)) + smoothstep(0.007, 0.0, abs(q.y - 0.86)) * step(0.14, abs(abs(q.x) - 0.95));
+      alb = mix(alb, GOLD * 0.95, clamp(gl, 0.0, 1.0));
+      float ao = 0.55 + 0.45 * smoothstep(0.1, 0.9, q.y);
+      vec3 light = SUNC * max(dot(n, LS), 0.0) + SKYC * (0.55 + 0.45 * n.y) * ao + vec3(0.25, 0.2, 0.16) * (0.5 - 0.5 * n.y) * ao;
+      light += vec3(1.0, 0.8, 0.6) * u_flash * 0.3;
+      col = alb * light + skyGrad(reflect(rd, n)) * 0.06 * ao;
+      return true;
+    }
+    void main(){
+      setup();
+      vec2 uv = gl_FragCoord.xy / u_res;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      BO = vec3(0.0, CAMH - 1.65, 1.5);
+      vec3 rd0 = camRay(uv);
+      vec3 col;
+      if(!balcony(vec3(0.0, CAMH, 0.0), rd0, col)){
+        // until the city has compiled: the evening sky over a hazy town
+        vec3 fall = rd0.y > 0.0 ? skyGrad(rd0) : mix(skyGrad(vec3(rd0.x, 0.01, rd0.z)) * 0.9, vec3(0.5, 0.44, 0.42), smoothstep(0.0, -0.25, rd0.y));
+        col = mix(fall, texelFetch(u_col, ivec2(gl_FragCoord.xy), 0).rgb * 2.0, u_ready);
+        // the salute: cannon smoke on the roofs, doves, fireworks over the city
+        float sa2 = T - u_salute;
+        for(int i = 0; i < 26 + ZERO; i++){
+          if(i < 4){
+            float ti = sa2 - (1.0 + float(i) * 0.45);
+            if(ti < 0.0 || ti > 8.0) continue;
+            vec3 Cn = i == 0 ? vec3(-70.0, 27.0, 238.0) : (i == 1 ? vec3(70.0, 27.0, 238.0) : (i == 2 ? vec3(-100.0, 27.0, 110.0) : vec3(100.0, 27.0, 110.0)));
+            float s = F / zcOf(Cn);
+            vec2 q = (p - projP(Cn)) / s;
+            if(dot(q, q) > 900.0) continue;
+            col += vec3(1.0, 0.75, 0.4) * exp(-length(q) * 0.35) * exp(-ti * 9.0) * 2.0;
+            vec2 sq = q - vec2(ti * 2.0, 2.0 + ti * 3.0);
+            float rr = 2.0 + ti * 4.5;
+            float nn = fbm(sq * 0.22 + vec2(float(i) * 3.0, ti * 0.4));
+            col = mix(col, vec3(0.9, 0.88, 0.86) * (0.62 + 0.4 * nn), smoothstep(rr, rr * 0.35, length(sq) + (nn - 0.5) * rr * 0.9) * exp(-ti * 0.33) * 0.7);
+          } else if(i < 18){
+            float da = sa2 - 2.0;
+            if(da < 0.0 || da > 10.0) continue;
+            float fi = float(i - 4);
+            vec3 A0 = vec3((hash(vec2(fi, 1.0)) - 0.5) * 120.0, 27.0, 236.0);
+            vec3 A1 = vec3((hash(vec2(fi, 2.0)) - 0.5) * 50.0, 46.0 + hash(vec2(fi, 3.0)) * 16.0, 30.0);
+            float k = clamp((da - hash(vec2(fi, 4.0)) * 1.5) / 7.5, 0.0, 1.0);
+            if(k <= 0.0 || k >= 1.0) continue;
+            vec3 B = mix(A0, A1, k) + vec3(0.0, sin(k * 9.0 + fi) * 2.0, 0.0);
+            float s = F / zcOf(B);
+            vec2 q = (p - projP(B)) / s;
+            if(dot(q, q) > 4.0) continue;
+            float flap = sin(T * 14.0 + fi * 2.0);
+            float d = min(sdSeg(q, vec2(0.0), vec2(-0.75, 0.35 * flap)), sdSeg(q, vec2(0.0), vec2(0.75, 0.35 * flap))) - 0.09;
+            d = min(d, sdEll2(q, vec2(0.28, 0.12)));
+            float aa = 1.5 / (u_res.y * s);
+            col = mix(col, vec3(0.98, 0.97, 0.94) * (0.8 + 0.3 * smoothstep(-0.2, 0.3, q.y)), smoothstep(aa, -aa, d) * (1.0 - smoothstep(0.85, 1.0, k)));
+          } else {
+            vec4 f = u_fw[i - 18];
+            float age = T - f.z;
+            if(age < 0.0 || age > 4.8) continue;
+            vec3 B0 = vec3(f.x, 27.0, f.y);
+            vec3 B1 = vec3(f.x + (fract(f.w * 7.3) - 0.5) * 30.0, 64.0 + fract(f.w * 3.1) * 42.0, f.y);
+            float kc = fract(f.w * 3.7) * 5.0;
+            vec3 fc = kc < 1.0 ? vec3(1.0, 0.76, 0.32) : (kc < 2.0 ? vec3(1.0, 0.28, 0.32) : (kc < 3.0 ? vec3(0.92, 0.94, 1.0) : (kc < 4.0 ? vec3(0.42, 0.62, 1.0) : vec3(0.55, 1.0, 0.62))));
+            if(age < 1.1){
+              float k = age / 1.1; k = 1.0 - (1.0 - k) * (1.0 - k);
+              vec2 a = projP(B0), b = projP(mix(B0, B1, k));
+              col += vec3(1.0, 0.86, 0.62) * smoothstep(0.004, 0.0, length(p - b)) * 1.5;
+              vec2 dir = b - a;
+              float along = clamp(dot(p - a, dir) / max(dot(dir, dir), 1e-7), 0.0, 1.0);
+              col += vec3(1.0, 0.7, 0.4) * smoothstep(0.0025, 0.0, length(p - (a + dir * along))) * along * 0.7 * step(0.45, hash(vec2(floor(along * 60.0), f.w + T)));
+              continue;
+            }
+            float a2 = age - 1.1;
+            vec2 c = projP(B1);
+            float s = F / zcOf(B1);
+            float R = 44.0 * s;
+            if(length(p - c) > R * 1.5 + 0.02) continue;
+            float fade = exp(-a2);
+            col += fc * exp(-length(p - c) / (R * 0.35)) * (exp(-a2 * 4.0) * 1.1 + 0.18 * fade);
+            float sz = max(0.0045, 1.4 * s);
+            for(int j = 0; j < 40 + ZERO; j++){
+              float fj = float(j);
+              float an = fj * 2.39996 + f.w * 10.0;
+              float rr = sqrt(fract(fj * 0.618 + f.w)) * (0.85 + 0.15 * hash(vec2(fj, f.w)));
+              vec2 pp = c + vec2(cos(an), sin(an)) * rr * (1.0 - exp(-a2 * 2.0)) * R - vec2(0.0, a2 * a2 * 0.06 * R);
+              float dp = length(p - pp);
+              col += fc * (smoothstep(sz, 0.0, dp) * 2.6 + exp(-dp / (sz * 2.2)) * 0.35) * fade * (0.6 + 0.4 * sin(T * 30.0 + fj * 3.0));
+            }
+          }
+        }
+      }
+      // confetti in the air in front of you, and the handfuls thrown where you click
+      float dens = 0.035 + SAL * 0.32;
+      float msc = ASP < 0.8 ? 1.6 : 1.0;
+      for(int L = 0; L < 6 + ZERO; L++){
+        if(L < 3){
+          float fl = float(L);
+          float S = (26.0 - fl * 6.0) * msc;
+          vec2 g = vec2(p.x + sin(T * 0.4 + fl) * 0.05, p.y + T * (0.05 + fl * 0.03)) * S;
+          vec2 id = floor(g); vec2 f = fract(g) - 0.5;
+          float h = hash(id + fl * 17.0);
+          if(h > dens * (0.5 + fl * 0.15)) continue;
+          vec2 o = (vec2(hash(id + 1.0), hash(id + 2.0)) - 0.5) * 0.6;
+          float spin = T * (3.0 + h * 6.0) + h * 20.0;
+          vec2 d = rot(f - o, h * 6.28 + T * (h - 0.5) * 2.0);
+          vec2 sz = vec2(0.12 * abs(cos(spin)) + 0.02, 0.065) * (1.0 + fl * 0.2);
+          float px = 1.5 / u_res.y * S;
+          col = mix(col, confC(h * 13.0) * (0.7 + 0.5 * abs(sin(spin))), smoothstep(px, -px, max(abs(d.x) - sz.x, abs(d.y) - sz.y)) * 0.95);
+        } else if(L == 3){
+          if(SAL < 0.01) continue;
+          vec2 g = vec2(p.x + sin(T * 0.8 + p.y * 3.0) * 0.04, p.y + T * 0.07) * 11.0;
+          vec2 id = floor(g); vec2 f = fract(g) - 0.5;
+          float h = hash(id + 50.0);
+          if(h > SAL * 0.4) continue;
+          vec2 d = rot(f - (vec2(hash(id + 3.0), hash(id + 4.0)) - 0.5) * 0.5, T * (h - 0.5) * 3.0 + h * 9.0);
+          float pe = sdEll2(d, vec2(0.11, 0.07 + 0.03 * abs(sin(T * 2.0 + h * 9.0))));
+          float px = 1.5 / u_res.y * 11.0;
+          col = mix(col, vec3(0.86, 0.1, 0.2) * (0.7 + 0.5 * smoothstep(0.1, -0.1, d.y)), smoothstep(px, -px, pe));
+        } else {
+          vec4 w = L == 4 ? u_wave0 : u_wave1;
+          float a = T - w.z;
+          vec2 c = vec2(w.x * ASP, w.y);
+          if(a < 0.0 || a > 2.6 || length(p - c) > 0.7) continue;
+          for(int i = 0; i < 26 + ZERO; i++){
+            float fi = float(i);
+            float an = 1.5708 + (hash(vec2(fi, w.z)) - 0.5) * 2.6;
+            float sp = (0.35 + 0.45 * hash(vec2(fi, w.z + 1.0))) * (0.6 + 0.3 * w.w);
+            vec2 pp = c + vec2(cos(an), sin(an)) * sp * (1.0 - exp(-a * 3.0)) * 0.45 - vec2(0.0, a * a * 0.05);
+            vec2 d = rot(p - pp, a * (4.0 + fi) + fi);
+            float flip = abs(cos(a * 9.0 + fi * 2.0));
+            col = mix(col, confC(fi + w.z), smoothstep(0.0015, 0.0, max(abs(d.x) - 0.006 * flip - 0.0012, abs(d.y) - 0.0035)) * (1.0 - smoothstep(2.0, 2.6, a)));
+          }
+        }
+      }
+      col = col / (1.0 + col * 0.14) * 1.08;
+      col = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, 1.07);
+      vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * 0.5;
+      col += (hash(gl_FragCoord.xy + fract(T * 7.0)) - 0.5) * (1.5 / 255.0);
+      fragColor = vec4(col, 1.0);
+    }
+  `;
+  const W = ()=> window.innerWidth, H = ()=> window.innerHeight;
+  const reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const sfx = (fn)=>{ try{ fn(AMB); }catch(e){} };
+  const timers = [];
+  let alive = true;
+  const later = (ms, fn)=>{ timers.push(setTimeout(()=>{ if(alive) fn(); }, ms)); };
+  let layerRef = null;
+  const ptr = { x: 0.5, y: 0.3 }; let ptrOn = 0.35;
+  const waves = [[0.5, 0.3, -100, 0], [0.5, 0.3, -100, 0]]; let slot = 0;
+  let spinAt = -100, spinSfxAt = -100, saluteAt = -100;
+  const fw = new Float32Array(32); for(let i = 0; i < 8; i++) fw[i * 4 + 2] = -100;
+  let fwSlot = 0;
+  const salute = { n: 0, last: -100, cooldownUntil: -1 };
+  let cityK = 0, cityReady = false;
+
+  // ---- sound: a crowd's «ура», a herald's trumpet, the salute ----
+  const cheer = (A, g)=>{
+    const f = A.fx;
+    [[620, 980], [820, 1250], [1050, 760], [480, 700], [1400, 1100]].forEach(([a, b], i)=> f.noise(1.3 + i * 0.25, 'bandpass', a, b, 1.6, g * (0.55 - i * 0.07), i * 0.04, 'pink'));
+    for(let i = 0; i < 3; i++) f.tone(1500 + Math.random() * 900, 2300 + Math.random() * 800, 0.25 + Math.random() * 0.2, 'sine', g * 0.08, 0.15 + Math.random() * 0.6);
+  };
+  const trumpet = (A, notes, g)=> notes.forEach(([m, s, d])=>{
+    const hz = 440 * Math.pow(2, (m - 69) / 12);
+    A.fx.tone(hz, hz * 1.002, d, 'sawtooth', g, s, 2600);
+    A.fx.tone(hz * 2, hz * 2.004, d * 0.9, 'square', g * 0.22, s, 3200);
+  });
+  const fanfare = (A, g)=> trumpet(A, [[67, 0, 0.17], [67, 0.2, 0.17], [67, 0.4, 0.17], [72, 0.6, 0.5], [76, 1.15, 0.3], [79, 1.5, 1.0], [84, 1.5, 1.0]], g);
+  // a rocket from the roofs: x and z in metres over the city
+  const launch = (x, z, color)=>{
+    const t = layerRef ? layerRef.now() : 0;
+    const k = fwSlot++ % 8;
+    fw.set([x, z, t, color], k * 4);
+    sfx(A=>{ A.fx.tone(650 + Math.random() * 150, 1700 + Math.random() * 400, 1.0, 'sine', 0.03); });
+    later(1100, ()=> sfx(A=>{
+      A.fx.sub(0.26);
+      A.fx.noise(0.5, 'lowpass', 900, 120, 0.7, 0.16);
+      for(let i = 0; i < 6; i++) A.fx.noise(0.06, 'highpass', 4000, 6500, 0.7, 0.05, 0.25 + Math.random() * 1.1, 'white');
+    }));
+  };
+
+  // ---- «Королевский салют»: three clicks on the square, then 45 s to reload ----
+  const chip = document.createElement('div');
+  chip.id = 'gk-salute'; chip.setAttribute('aria-live', 'polite');
+  document.body.appendChild(chip);
+  let chipKey = '';
+  const renderChip = (t)=>{
+    const cd = salute.cooldownUntil - t;
+    const pips = [0, 1, 2].map(i=> `<i class="${cd > 0 ? 'cd' : (i < salute.n ? 'on' : '')}">♛</i>`).join('');
+    const line = !cityReady ? 'город строится…' : cd > 0 ? (t - saluteAt < 8 ? 'Салют!' : `перезарядка ${Math.floor(cd / 60)}:${String(Math.ceil(cd) % 60).padStart(2, '0')}`)
+      : salute.n === 0 ? 'клик по площади ×3' : salute.n === 1 ? 'ещё дважды' : 'ещё раз!';
+    const key = pips + line;
+    if(key === chipKey) return;
+    chipKey = key;
+    chip.innerHTML = `<b>Королевский салют</b><span class="gk-pips">${pips}</span><span class="gk-line">${line}</span>`;
+    chip.classList.toggle('gk-ready', cd <= 0 && cityReady);
+  };
+  const fireSalute = (t)=>{
+    saluteAt = t; salute.cooldownUntil = t + 45; salute.n = 0;
+    document.body.classList.add('gk-fanfare');
+    later(4200, ()=> document.body.classList.remove('gk-fanfare'));
+    sfx(A=>{ A.duck(0.35, 7); fanfare(A, 0.06); A.fx.noise(1.3, 'bandpass', 1700, 2300, 0.8, 0.05, 0, 'white'); });
+    [1.0, 1.45, 1.9, 2.35].forEach(d=> later(d * 1000, ()=> sfx(A=>{ A.fx.impact(0.5, 0.9); A.fx.noise(1.6, 'lowpass', 520, 50, 0.7, 0.3); })));
+    later(1300, ()=> sfx(A=> cheer(A, 0.2)));
+    later(3400, ()=> sfx(A=> cheer(A, 0.16)));
+    later(2600, ()=> sfx(A=> A.fx.shimmer(392, 0.08)));
+    later(4300, ()=> sfx(A=> A.fx.shimmer(523, 0.06)));
+    for(let i = 0; i < 11; i++){
+      later((1.9 + i * 0.62 + Math.random() * 0.25) * 1000, ()=> launch(-240 + Math.random() * 480, 280 + Math.random() * 260, Math.random() * 10));
+    }
+  };
+  renderChip(0);
+
+  // ---- GEO and SHADE: two more programs on the same context, rendered before the main one ----
+  let X = null;
+  const mkProg = (gl, src, par)=>{
+    const sh = (type, s)=>{ const o = gl.createShader(type); gl.shaderSource(o, s); gl.compileShader(o); return o; };
+    const vs = sh(gl.VERTEX_SHADER, '#version 300 es\nin vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }');
+    const fs = sh(gl.FRAGMENT_SHADER, src);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+    gl.bindAttribLocation(prog, 0, 'a');
+    gl.linkProgram(prog);
+    const o = { prog, ready: false, failed: false, locs: {} };
+    o.U = (n)=> (n in o.locs) ? o.locs[n] : (o.locs[n] = gl.getUniformLocation(prog, n));
+    o.poll = ()=>{
+      if(o.ready || o.failed) return o.ready;
+      if(par && !gl.getProgramParameter(prog, par.COMPLETION_STATUS_KHR)) return false;
+      if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.warn('[theme shader] glokus_king: ' + gl.getShaderInfoLog(fs) + ' ' + gl.getProgramInfoLog(prog)); o.failed = true; return false; }
+      o.ready = true; return true;
+    };
+    return o;
+  };
+  const texOf = (gl, w, h, ifmt, fmt, type)=>{
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  };
+  const alloc = (gl, w, h)=>{
+    if(X.tex) X.tex.forEach(t=> gl.deleteTexture(t));
+    if(X.fbG){ gl.deleteFramebuffer(X.fbG); gl.deleteFramebuffer(X.fbC); }
+    X.tex = [texOf(gl, w, h, gl.RGBA32F, gl.RGBA, gl.FLOAT), texOf(gl, w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), texOf(gl, w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT), texOf(gl, w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE)];
+    X.fbG = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, X.fbG);
+    for(let i = 0; i < 3; i++) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, X.tex[i], 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+    const okG = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    X.fbC = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, X.fbC);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, X.tex[3], 0);
+    const okC = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    X.w = w; X.h = h; X.ok = okG && okC;
+  };
+  let dusk = 0.2, flash = 0;
+  const cam = { x: 0, y: 0 };
+  const setCommon = (gl, U, t, w, h)=>{
+    const d = new Date();
+    gl.uniform2f(U('u_res'), w, h);
+    gl.uniform1f(U('u_time'), t);
+    gl.uniform2f(U('u_ptr'), ptr.x, ptr.y);
+    gl.uniform1f(U('u_ptrOn'), ptrOn);
+    gl.uniform4f(U('u_wave0'), waves[0][0], waves[0][1], waves[0][2], waves[0][3]);
+    gl.uniform4f(U('u_wave1'), waves[1][0], waves[1][1], waves[1][2], waves[1][3]);
+    gl.uniform1f(U('u_spinAt'), spinAt);
+    gl.uniform1f(U('u_salute'), saluteAt);
+    gl.uniform1f(U('u_dusk'), dusk);
+    gl.uniform1f(U('u_flash'), Math.min(1, flash));
+    gl.uniform3f(U('u_clock'), ((d.getHours() % 12) + d.getMinutes() / 60) / 12, (d.getMinutes() + d.getSeconds() / 60) / 60, d.getSeconds() / 60);
+    gl.uniform4fv(U('u_fw[0]'), fw);
+    gl.uniform2f(U('u_cam'), cam.x, cam.y);
+    gl.uniform1f(U('u_hq'), GFX.mode === 'ultra' ? 1 : 0);
+  };
+
+  const offSpin = demoOnSpin(()=>{
+    const t = layerRef ? layerRef.now() : 0;
+    if(t - spinAt > 2) spinAt = t;
+    if(t - spinSfxAt > 3){ spinSfxAt = t; sfx(A=>{ trumpet(A, [[72, 0, 0.11], [79, 0.12, 0.34]], 0.03); cheer(A, 0.05); }); }
+  });
+  document.body.classList.add('gk-royal');
+
+  layerRef = v2Bespoke(id, FRAG, {
+    scale: 0.8, webgl2: true, async: true,
+    mat: { bg0:'#2a050b', acc:'#f2c75c' },
+    spin: ['linear-gradient(180deg,#b51d33,#5a0a16)', '#ffe39a'],
+    frame: (gl, U, t, dt, st)=>{
+      const mainProg = gl.getParameter(gl.CURRENT_PROGRAM);
+      const active = st && performance.now() - st.moved < 5000;
+      ptr.x = ease(ptr.x, active ? st.x / W() : 0.5 + 0.2 * Math.sin(t * 0.13), 0.08, dt);
+      ptr.y = ease(ptr.y, active ? 1 - st.y / H() : 0.4 + 0.06 * Math.sin(t * 0.21), 0.08, dt);
+      ptrOn = ease(ptrOn, active ? 1 : 0.4, 0.3, dt);
+      // look around: the head turns toward the mouse, and drifts slowly when you leave it be
+      const lookX = active ? (st.x / W() - 0.5) * 0.95 : 0.14 * Math.sin(t * 0.045);
+      const lookY = active ? (0.5 - st.y / H()) * 0.24 : 0.02 * Math.sin(t * 0.06);
+      cam.x = ease(cam.x, reduce ? 0 : lookX, 0.35, dt);
+      cam.y = ease(cam.y, reduce ? 0 : lookY, 0.35, dt);
+      dusk = reduce ? 0.2 : 0.14 + 0.34 * (0.5 - 0.5 * Math.cos(t * 2 * Math.PI / 360));
+      flash = 0;
+      for(let i = 0; i < 8; i++){ const tb = fw[i * 4 + 2] + 1.1; if(t > tb && t - tb < 1.5) flash += 0.35 * Math.exp(-(t - tb) * 6); }
+      [1.0, 1.45, 1.9, 2.35].forEach(d=>{ const tc = saluteAt + d; if(t > tc && t - tc < 1) flash += 0.35 * Math.exp(-(t - tc) * 8); });
+      const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+      if(!X){
+        X = { ext: gl.getExtension('EXT_color_buffer_float'), par: gl.getExtension('KHR_parallel_shader_compile') };
+        if(X.ext){ X.geo = mkProg(gl, GEO, X.par); X.shade = mkProg(gl, SHADE, X.par); }
+      }
+      let drew = false;
+      if(X.ext){
+        const gR = X.geo.poll(), sR = X.shade.poll();
+        if(gR && sR){
+          if(X.w !== w || X.h !== h) alloc(gl, w, h);
+          if(X.ok){
+            gl.bindFramebuffer(gl.FRAMEBUFFER, X.fbG);
+            gl.viewport(0, 0, w, h);
+            gl.useProgram(X.geo.prog);
+            setCommon(gl, X.geo.U, t, w, h);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, X.fbC);
+            gl.useProgram(X.shade.prog);
+            setCommon(gl, X.shade.U, t, w, h);
+            for(let i = 0; i < 3; i++){ gl.activeTexture(gl.TEXTURE1 + i); gl.bindTexture(gl.TEXTURE_2D, X.tex[i]); gl.uniform1i(X.shade.U('u_g' + i), 1 + i); }
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.useProgram(mainProg);
+            gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, X.tex[3]);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.uniform1i(U('u_col'), 4);
+            drew = true;
+          }
+        }
+      }
+      if(drew && !cityReady) cityReady = true;
+      if(!X.ext || (X.geo && X.geo.failed) || (X.shade && X.shade.failed)) cityReady = true;
+      cityK = drew ? ease(cityK, 1, 0.25, dt) : 0;
+      gl.viewport(0, 0, w, h);
+      setCommon(gl, U, t, w, h);
+      gl.uniform1f(U('u_ready'), cityK);
+      renderChip(t);
+    },
+    down: (e, s, layer)=>{
+      const t = layer.now();
+      const u = uvOf(e);
+      const w = waves[slot]; slot = 1 - slot;
+      w[0] = u[0]; w[1] = u[1]; w[2] = t;
+      if(t >= salute.cooldownUntil){
+        if(t - salute.last > 12) salute.n = 0;
+        salute.n++; salute.last = t;
+        w[3] = 0.6 + 0.25 * salute.n;
+        sfx(A=>{ cheer(A, 0.08 + 0.04 * salute.n); A.fx.noise(0.12, 'highpass', 2600, 5200, 0.7, 0.08); });
+        if(salute.n >= 3) fireSalute(t);
+      } else {
+        w[3] = 0.7;
+        sfx(A=> cheer(A, 0.08));
+      }
+      renderChip(t);
+    },
+    teardown: ()=>{
+      alive = false;
+      timers.forEach(clearTimeout);
+      offSpin();
+      chip.remove();
+      document.body.classList.remove('gk-royal', 'gk-fanfare');
+    }
+  });
+};
+
+
+// ------------------------------------------------------------
+// ОБЫЧНЫЙ · Утренний свет — a warm wall at eight in the morning: the window
+// throws four soft panes of light across it and a twig outside crosses them.
+// One static SVG: nothing moves, nothing costs.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_common = function(){
+  const leaves = [[52,8,28],[96,24,-34],[150,26,22],[204,34,-30],[262,30,18],[316,26,-24],[366,18,10],[120,-4,40],[240,8,-40]]
+    .map(([x, y, r])=> `<ellipse cx='${x}' cy='${y}' rx='36' ry='13' transform='rotate(${r} ${x} ${y})'/>`).join('');
+  const el = document.createElement('div');
+  el.id = 'demo-common'; el.setAttribute('aria-hidden', 'true');
+  el.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 1000' preserveAspectRatio='xMidYMid slice'>
+    <defs>
+      <linearGradient id='dc-wall' x1='0' y1='0' x2='0.35' y2='1'><stop offset='0' stop-color='#f8efdd'/><stop offset='1' stop-color='#ecdcbf'/></linearGradient>
+      <radialGradient id='dc-warm' cx='0.8' cy='0.05' r='0.75'><stop offset='0' stop-color='#fff1cf' stop-opacity='0.95'/><stop offset='1' stop-color='#fff1cf' stop-opacity='0'/></radialGradient>
+      <linearGradient id='dc-floor' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#d9c29c' stop-opacity='0'/><stop offset='1' stop-color='#cdb08a' stop-opacity='0.55'/></linearGradient>
+      <radialGradient id='dc-edge' cx='0.55' cy='0.4' r='0.85'><stop offset='0.55' stop-color='#6a4a22' stop-opacity='0'/><stop offset='1' stop-color='#6a4a22' stop-opacity='0.16'/></radialGradient>
+      <filter id='dc-soft' x='-30%' y='-30%' width='160%' height='160%'><feGaussianBlur stdDeviation='16'/></filter>
+      <filter id='dc-leaf' x='-30%' y='-30%' width='160%' height='160%'><feGaussianBlur stdDeviation='5'/></filter>
+      <filter id='dc-grain'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.42  0 0 0 0 0.33  0 0 0 0 0.2  0 0 0 0.07 0'/></filter>
+    </defs>
+    <rect width='1600' height='1000' fill='url(#dc-wall)'/>
+    <rect width='1600' height='1000' fill='url(#dc-warm)'/>
+    <rect y='640' width='1600' height='360' fill='url(#dc-floor)'/>
+    <g filter='url(#dc-soft)' fill='#fffaf0' opacity='0.9' transform='translate(860 90) skewX(-22) rotate(5)'>
+      <rect width='240' height='300' rx='6'/><rect x='262' width='240' height='300' rx='6'/>
+      <rect y='322' width='240' height='300' rx='6'/><rect x='262' y='322' width='240' height='300' rx='6'/>
+    </g>
+    <g filter='url(#dc-leaf)' fill='#9c7f54' opacity='0.26' transform='translate(990 330) rotate(-16)'>
+      <path d='M-40 -6 C80 22 230 38 400 16' stroke='#9c7f54' stroke-width='3.5' fill='none'/>${leaves}
+    </g>
+    <rect width='1600' height='1000' fill='url(#dc-edge)'/>
+    <rect width='1600' height='1000' filter='url(#dc-grain)'/>
+  </svg>`;
+  demoDom(el);
+};
+
+// ------------------------------------------------------------
+// СЛАБЫЙ · Сэйгайха — the old wave pattern of blue-and-white porcelain,
+// rising from the bottom like a glaze and drifting very slowly on a single
+// composited layer; wind chimes (🎐), the aura's symbol, float in front.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_weak = function(){
+  const ink = '#2b4c8c', paper = '#f2efe6';
+  const scale = (cx, cy)=> `<circle cx='${cx}' cy='${cy}' r='20' fill='${paper}'/>` +
+    [19, 14.6, 10.2, 5.8].map((r, i)=> `<circle cx='${cx}' cy='${cy}' r='${r}' fill='none' stroke='${ink}' stroke-width='${i === 0 ? 1.6 : 1.1}' opacity='${0.9 - i * 0.12}'/>`).join('');
+  const tile = `<svg xmlns='http://www.w3.org/2000/svg' width='40' height='20'>${scale(20, 0)}${scale(0, 10)}${scale(40, 10)}${scale(20, 20)}</svg>`;
+  const url = (s)=> `url("data:image/svg+xml,${encodeURIComponent(s)}")`;
+  const wash = document.createElement('div');
+  wash.id = 'demo-weak-wash'; wash.setAttribute('aria-hidden', 'true');
+  demoDom(wash);
+  const el = document.createElement('div');
+  el.id = 'demo-weak'; el.setAttribute('aria-hidden', 'true');
+  el.style.backgroundImage = url(tile);
+  el.style.backgroundSize = '60px 30px';
+  demoDom(el);
+};
+
+// ------------------------------------------------------------
+// НЕПЛОХОЙ · Лава-лампа — inside a lava lamp: soft wax blobs rise from the
+// warm bulb, merge, split and sink again. One motif (the wax), one particle
+// field (tiny bubbles), and the cursor is a hand warming the glass — the
+// wax near it swells and glows. No click event at this class.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_decent = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + `
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_ptr; uniform float u_ptrOn;
+    float ASP;
+    ${DEMO_GRADE}
+    vec2 blobPos(float i, float t){
+      float x = 0.5 * ASP + 0.3 * min(ASP, 1.4) * sin(i * 1.93 + t * 0.05 * (1.0 + 0.17 * i));
+      float y = 0.5 + 0.46 * sin(t * (0.045 + 0.011 * i) + i * 2.4);
+      return vec2(x, y);
+    }
+    float field(vec2 p, float t, vec2 cp, out vec2 grad){
+      float f = 0.0; grad = vec2(0.0);
+      for(int k = 0; k < 8; k++){
+        float i = float(k);
+        vec2 c = blobPos(i, t);
+        float r = 0.07 + 0.035 * fract(sin(i * 12.9) * 43758.5);
+        vec2 dc = c - cp;
+        r *= 1.0 + 0.4 * u_ptrOn * exp(-dot(dc, dc) * 10.0);
+        vec2 d = p - c;
+        float d2 = dot(d, d) + 0.0004;
+        float v = r * r / d2;
+        f += v;
+        grad += -2.0 * v * d / d2;
+      }
+      return f;
+    }
+    void main(){
+      vec2 uv = gl_FragCoord.xy / u_res;
+      ASP = u_res.x / u_res.y;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      float t = u_time;
+      vec2 cp = vec2(u_ptr.x * ASP, u_ptr.y);
+      // the liquid: plum, lit from the bulb below
+      vec3 col = mix(vec3(0.10, 0.02, 0.06), vec3(0.05, 0.01, 0.05), uv.y);
+      col += vec3(1.0, 0.36, 0.1) * exp(-uv.y * 4.5) * 0.32;
+      float cl = exp(-dot(p - cp, p - cp) * 9.0) * u_ptrOn;
+      col += vec3(1.0, 0.4, 0.2) * cl * 0.07;
+      // the wax
+      vec2 g;
+      float F = field(p, t, cp, g);
+      float m = smoothstep(0.96, 1.04, F);
+      vec3 n = normalize(vec3(-g * 0.05, 1.0));
+      vec3 L = normalize(vec3(-0.35, 0.55, 0.75));
+      float dif = max(dot(n, L), 0.0);
+      float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 36.0);
+      float sss = clamp(1.0 - 1.0 / max(F, 0.001), 0.0, 1.0);
+      vec3 wax = mix(vec3(1.0, 0.36, 0.08), vec3(0.92, 0.12, 0.34), smoothstep(0.05, 0.95, uv.y));
+      vec3 blob = wax * (0.32 + 0.6 * dif) + wax * sss * (0.35 + 0.7 * exp(-uv.y * 2.2));
+      blob += vec3(1.0, 0.85, 0.7) * spec * 0.45;
+      blob += vec3(1.0, 0.6, 0.3) * pow(1.0 - n.z, 2.0) * 0.35;
+      blob += wax * cl * 0.35;
+      col += wax * smoothstep(0.35, 0.95, F) * (1.0 - m) * 0.22;
+      col = mix(col, blob, m);
+      // one particle field: tiny bubbles rising through the liquid
+      vec2 bg = vec2(p.x * 16.0, p.y * 16.0 - t * 0.9);
+      vec2 bid = floor(bg); vec2 bf = fract(bg) - 0.5;
+      float bh = hash(bid);
+      if(bh > 0.86){
+        vec2 bo = (vec2(hash(bid + 1.3), hash(bid + 4.7)) - 0.5) * 0.5;
+        bo.x += 0.12 * sin(t * 1.3 + bh * 30.0);
+        float br = 0.05 + 0.06 * hash(bid + 2.1);
+        float bd = length(bf - bo);
+        float ring = max(0.0, smoothstep(br, br * 0.7, bd) - smoothstep(br * 0.7, br * 0.35, bd) * 0.7);
+        col += vec3(1.0, 0.75, 0.6) * ring * 0.22 * (1.0 - m);
+      }
+      // the glass: two vertical reflections of the room
+      float dx1 = uv.x - 0.1, dx2 = uv.x - 0.9;
+      col += vec3(1.0, 0.86, 0.78) * (exp(-dx1 * dx1 * 900.0) * 0.07 + exp(-dx2 * dx2 * 3000.0) * 0.05);
+      gl_FragColor = vec4(demoGrade(col, uv, 0.7), 1.0);
+    }
+  `;
+  let ptrOn = 0;
+  v2Bespoke(id, FRAG, {
+    scale: 0.4,
+    matKind: 'tint', mat: { bg0:'#1a0812', acc:'#ff7a3a' },
+    spin: ['linear-gradient(180deg,#ffb06a,#ff6a3a 55%,#c8304a)', '#2a0610'],
+    frame: (gl, U, t, dt, st)=>{
+      ptrOn = ease(ptrOn, (st && performance.now() - st.moved < 2500) ? 1 : 0, 0.15, dt);
+      gl.uniform2f(U('u_ptr'), st ? st.x / window.innerWidth : 0.5, st ? 1 - st.y / window.innerHeight : 0.5);
+      gl.uniform1f(U('u_ptrOn'), ptrOn);
+    }
+  });
+};
+
+// ------------------------------------------------------------
+// НОРМАЛЬНЫЙ · Дождь на стекле — 3 a.m., a city behind a rain-streaked
+// window. Two motifs: the out-of-focus city (bokeh lights, traffic) and the
+// water on the glass (beads that refract a sharp, upside-down image of the
+// city; drops that slide in jerks and leave clear trails). Two particle
+// depths: rain falling outside, near and far. The cursor is your breath
+// wiping the fog; a click flicks a fresh fat drop onto the glass.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_normal = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + `
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_ptr; uniform float u_ptrOn; uniform vec3 u_drop;
+    float ASP;
+    ${DEMO_GRADE}
+    // the city, out of focus by 'blur' (0 sharp .. 1 soft)
+    vec3 city(vec2 p, float blur){
+      float t = u_time;
+      vec3 col = mix(vec3(0.05, 0.04, 0.10), vec3(0.03, 0.03, 0.08), smoothstep(0.2, 1.0, p.y));
+      col += vec3(0.45, 0.2, 0.12) * exp(-abs(p.y - 0.26) * 5.0) * 0.22;
+      for(int L = 0; L < 3; L++){
+        float fl = float(L);
+        float S = 6.0 + fl * 5.0;
+        vec2 g = vec2(p.x * S + fl * 13.1, p.y * S * 0.9);
+        vec2 id = floor(g); vec2 f = fract(g) - 0.5;
+        float band = smoothstep(0.66, 0.36, p.y) * smoothstep(0.06, 0.2, p.y);
+        float h = hash(id + fl * 7.0);
+        if(h > 0.62 - band * 0.4){
+          vec2 o = (vec2(hash(id + 1.3), hash(id + 4.1)) - 0.5) * 0.3;
+          float r = (0.1 + 0.1 * hash(id + 2.2)) * (1.0 + blur * 0.5);
+          float d = length(f - o);
+          float disc = smoothstep(r, r - 0.02 - blur * 0.22, d);
+          disc *= 0.7 + 0.4 * smoothstep(r * 0.4, r, d) * (1.0 - blur * 0.7);
+          float k = hash(id + 9.0);
+          vec3 lc = k < 0.42 ? vec3(1.0, 0.6, 0.24) : (k < 0.62 ? vec3(1.0, 0.86, 0.62) : (k < 0.76 ? vec3(0.3, 0.8, 1.0) : (k < 0.9 ? vec3(1.0, 0.26, 0.36) : vec3(0.72, 0.42, 1.0))));
+          float tw = 0.8 + 0.2 * sin(t * (0.4 + h) + h * 40.0);
+          col += lc * disc * (0.34 - fl * 0.08) * tw * (0.35 + band);
+        }
+      }
+      // two lanes of traffic: tail lights going right, head lights going left
+      for(int k = 0; k < 2; k++){
+        float fk = float(k);
+        float y0 = 0.2 - fk * 0.035;
+        float dir = fk < 0.5 ? 1.0 : -1.0;
+        float x = p.x * 5.0 - t * 0.35 * dir + fk * 3.7;
+        float cid = floor(x); float cf = fract(x) - 0.5;
+        if(hash(vec2(cid, fk + 20.0)) > 0.45){
+          float r = 0.06 + blur * 0.08;
+          vec2 dd = vec2(cf * 0.2, p.y - y0);
+          float pair = smoothstep(r * 0.2 + 0.004, 0.0, length(dd - vec2(0.012, 0.0)) - r * 0.08) + smoothstep(r * 0.2 + 0.004, 0.0, length(dd + vec2(0.012, 0.0)) - r * 0.08);
+          col += (fk < 0.5 ? vec3(1.0, 0.18, 0.12) : vec3(1.0, 0.92, 0.75)) * pair * 0.5;
+        }
+      }
+      return col;
+    }
+    // rain falling outside, two depths
+    float rainOut(vec2 p, float t){
+      float a = 0.0;
+      for(int L = 0; L < 2; L++){
+        float fl = float(L);
+        float S = 40.0 + fl * 50.0;
+        vec2 g = vec2(p.x * S + p.y * 4.0, p.y * 3.0 + t * (3.5 - fl));
+        vec2 id = floor(g); vec2 f = fract(g);
+        float h = hash(id + fl * 3.0);
+        float streak = smoothstep(0.08, 0.0, abs(f.x - 0.5 - (h - 0.5) * 0.6)) * smoothstep(0.0, 0.5, f.y) * smoothstep(1.0, 0.6, f.y);
+        a += streak * step(0.8, h) * (0.22 - fl * 0.08);
+      }
+      return a;
+    }
+    // the water on the glass: xy = refraction offset, z = drop mask, w = cleared trail
+    vec4 glass(vec2 p, float t){
+      vec2 off = vec2(0.0); float m = 0.0, trail = 0.0;
+      // beads that grow, sit and dry out
+      vec2 g = p * 26.0; vec2 id = floor(g); vec2 f = fract(g) - 0.5;
+      float h = hash(id + 0.7);
+      vec2 o = (vec2(hash(id + 3.1), hash(id + 7.7)) - 0.5) * 0.6;
+      float life = fract(t * 0.04 + h * 7.0);
+      float r = (0.1 + 0.24 * hash(id + 1.9)) * smoothstep(0.0, 0.1, life) * smoothstep(1.0, 0.7, life);
+      vec2 q = f - o; float d = length(q);
+      if(h > 0.5 && d < r){ off -= q / 26.0 * 9.0; m = max(m, smoothstep(r, r * 0.8, d)); }
+      // drops that slide down in jerks, two sizes
+      for(int L = 0; L < 2; L++){
+        float fl = float(L);
+        float S = 8.0 + fl * 7.0;
+        float colId = floor(p.x * S);
+        float hc = hash(vec2(colId, fl * 11.0));
+        if(hc > 0.4){
+          float sp = 0.05 + 0.06 * hash(vec2(colId, 3.0 + fl));
+          float ph = fract(t * sp + hc * 10.0) * 5.0;
+          float prog = (floor(ph) + smoothstep(0.35, 1.0, fract(ph))) / 5.0;
+          float y = 1.12 - prog * 1.3;
+          float xw = (colId + 0.5 + (hash(vec2(colId, 5.0 + fl)) - 0.5) * 0.5) / S + 0.004 * sin(p.y * 28.0 + hc * 10.0);
+          float rr = (0.02 + 0.012 * hash(vec2(colId, 8.0))) * (1.0 - fl * 0.35);
+          vec2 qq = vec2(p.x - xw, p.y - y);
+          qq.y *= qq.y < 0.0 ? 0.85 : 1.3;
+          float dd = length(qq);
+          if(dd < rr){ off -= qq * 6.0; m = max(m, smoothstep(rr, rr * 0.8, dd)); }
+          float above = p.y - y;
+          if(above > 0.0 && above < 0.5){
+            float k = above / 0.5;
+            float w = rr * 0.6 * (1.0 - k);
+            trail = max(trail, smoothstep(w, w * 0.4, abs(p.x - xw)) * (1.0 - k));
+            float bc = floor(above * 34.0);
+            if(hash(vec2(colId + fl * 50.0, bc)) > 0.62){
+              vec2 bq = vec2(p.x - xw, (fract(above * 34.0) - 0.5) / 34.0);
+              float br = rr * 0.35 * (1.0 - k);
+              float bd = length(bq);
+              if(bd < br){ off -= bq * 6.0; m = max(m, smoothstep(br, br * 0.7, bd)); }
+            }
+          }
+        }
+      }
+      // the drop you flicked on
+      float age = t - u_drop.z;
+      if(age > 0.0 && age < 6.0){
+        float y = u_drop.y - 0.035 * age * age;
+        float x = u_drop.x * ASP + 0.004 * sin(age * 4.0);
+        vec2 qq = vec2(p.x - x, p.y - y); qq.y *= qq.y < 0.0 ? 0.85 : 1.3;
+        float rr = 0.04, dd = length(qq);
+        if(dd < rr){ off -= qq * 6.0; m = max(m, smoothstep(rr, rr * 0.85, dd)); }
+        float above = p.y - y;
+        if(above > 0.0 && above < u_drop.y - y + 0.001){
+          float k = above / max(0.001, u_drop.y - y);
+          trail = max(trail, smoothstep(rr * 0.6 * (1.0 - k * 0.5), rr * 0.2, abs(p.x - x)));
+        }
+      }
+      return vec4(off, m, trail);
+    }
+    void main(){
+      vec2 uv = gl_FragCoord.xy / u_res;
+      ASP = u_res.x / u_res.y;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      float t = u_time;
+      vec4 W = glass(p, t);
+      vec3 soft = city(p, 1.0) + vec3(0.55, 0.6, 0.8) * rainOut(p, t) * 0.6;
+      // a drop is a tiny fish-eye: a sharp, upside-down, slightly brighter city
+      vec3 sharp = city(p + W.xy, 0.12) * 1.25 + soft * 0.3;
+      vec3 col = mix(soft, sharp, W.z);
+      // condensation: the glass is fogged except where water ran or you breathed
+      vec2 cp = vec2(u_ptr.x * ASP, u_ptr.y);
+      float breath = exp(-dot(p - cp, p - cp) * 16.0) * u_ptrOn;
+      float fog = 0.62 * (1.0 - W.w * 0.92) * (1.0 - breath * 0.85) * (1.0 - W.z);
+      col = mix(col, soft * 0.45 + vec3(0.07, 0.065, 0.11), fog);
+      // drops catch a cold highlight up-left and a dark meniscus at the edge
+      float lit = dot(normalize(W.xy + 1e-5), normalize(vec2(0.7, -0.7)));
+      col += vec3(0.85, 0.9, 1.0) * smoothstep(0.75, 1.0, lit) * W.z * 0.25;
+      col *= 1.0 - 0.35 * W.z * (1.0 - W.z) * 4.0 * 0.5;
+      col += vec3(1.0, 0.7, 0.45) * breath * 0.04;
+      col = col / (1.0 + col * 0.25);
+      gl_FragColor = vec4(demoGrade(col * 1.15, uv, 0.6), 1.0);
+    }
+  `;
+  let ptrOn = 0; const drop = [0.5, 0.8, -100];
+  v2Bespoke(id, FRAG, {
+    scale: 0.5,
+    mat: { bg0:'#0a0c18', acc:'#ffb46a' },
+    spin: ['linear-gradient(180deg,#ffcf8a,#ff9a4a 55%,#d0603a)', '#2a1206'],
+    frame: (gl, U, t, dt, st)=>{
+      ptrOn = ease(ptrOn, (st && performance.now() - st.moved < 1800) ? 1 : 0, 0.2, dt);
+      gl.uniform2f(U('u_ptr'), st ? st.x / window.innerWidth : 0.5, st ? 1 - st.y / window.innerHeight : 0.5);
+      gl.uniform1f(U('u_ptrOn'), ptrOn);
+      gl.uniform3f(U('u_drop'), drop[0], drop[1], drop[2]);
+    },
+    down: (e, s, layer)=>{ const u = uvOf(e); drop[0] = u[0]; drop[1] = u[1]; drop[2] = layer.now(); }
+  });
+};
+
+// ------------------------------------------------------------
+// ХОРОШИЙ · Фонарики над рекой — a festival night. Hundreds of paper sky
+// lanterns rise from beyond the hills in three depths (far ones smaller,
+// hazier, slower), the river mirrors them in long trembling streaks and
+// little lotus lamps float on the water. The cursor is a breeze the
+// lanterns drift away from; a click releases your own lantern from that
+// spot, and every spin sends one up from the river.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_good = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_ptr; uniform float u_ptrOn; uniform vec4 u_lan[4];
+    float ASP;
+    const float HZ = 0.3;
+    ${DEMO_GRADE}
+    // one paper lantern in its own space: body |x| < ~0.5, |y| < 0.62
+    vec3 lantern(vec2 q, float flick, out float m, out float d){
+      float w = 0.4 + 0.1 * q.y;
+      vec2 dq = vec2(abs(q.x) - w, abs(q.y) - 0.6);
+      d = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - 0.08;
+      m = smoothstep(0.05, -0.05, d);
+      vec2 fq = (q - vec2(0.0, -0.46)) * vec2(1.5, 1.0);
+      float fl = exp(-length(fq) * 2.4) * flick;
+      vec3 paper = mix(vec3(0.92, 0.28, 0.06), vec3(1.0, 0.84, 0.5), clamp(fl * 1.4, 0.0, 1.0));
+      paper *= 0.5 + 0.7 * fl + 0.25 * smoothstep(0.6, -0.4, q.y);
+      paper *= 1.0 - 0.16 * smoothstep(0.05, 0.0, abs(fract(q.x * 2.2 + 0.5) - 0.5));
+      paper *= 0.72 + 0.28 * smoothstep(0.62, 0.28, q.y);
+      paper += vec3(1.0, 0.5, 0.15) * smoothstep(-0.12, 0.0, d) * 0.3;
+      return paper;
+    }
+    vec3 lanternLayer(vec3 col, vec2 p, float t, float L, vec2 cp){
+      float S = 2.4 * (1.0 + L * 1.5);
+      float speed = 0.05 / (1.0 + L * 0.7);
+      vec2 g = p * S;
+      float cx = floor(g.x);
+      float shift = t * speed * S + hash(vec2(cx, L)) * 9.0;
+      g.y -= shift;
+      vec2 id = floor(g); vec2 f = fract(g) - 0.5;
+      float h = hash(id + L * 17.0);
+      if(h < 0.52 + (2.0 - L) * 0.1) return col;
+      vec2 o = (vec2(hash(id + 1.0), hash(id + 2.0)) - 0.5) * 0.4;
+      o.x += 0.05 * sin(t * 0.5 + h * 20.0);
+      vec2 world = vec2((id.x + 0.5 + o.x) / S, (id.y + 0.5 + o.y + shift) / S);
+      vec2 dc = world - cp;
+      o += normalize(dc + 1e-4) * exp(-dot(dc, dc) * 7.0) * u_ptrOn * 0.16 * S;
+      float sz = 0.2;
+      vec2 q = (f - o) / sz;
+      q.x += q.y * 0.08 * sin(t * 0.7 + h * 9.0);
+      float flick = 0.85 + 0.15 * sin(t * 6.0 + h * 30.0) * sin(t * 2.3 + h * 11.0);
+      float m, d;
+      vec3 lc = lantern(q, flick, m, d);
+      float fade = 1.0 - L * 0.3;
+      lc = mix(lc, vec3(0.3, 0.16, 0.24), L * 0.25) * fade;
+      float vis = smoothstep(HZ + 0.01, HZ + 0.06, world.y);
+      col += vec3(1.0, 0.42, 0.1) * exp(-max(d, 0.0) * 4.0) * 0.22 * fade * vis;
+      return mix(col, lc, m * vis);
+    }
+    float ridge(float x, float base, float amp, float fr, float sd){ return HZ + base + amp * fbm3(vec2(x * fr + sd, sd)); }
+    vec3 world(vec2 p, vec2 uv, float refl){
+      float t = u_time, y = uv.y;
+      vec2 cp = vec2(u_ptr.x * ASP, u_ptr.y);
+      float AA = 1.5 / u_res.y;
+      vec3 c = mix(vec3(0.17, 0.10, 0.22), vec3(0.025, 0.035, 0.11), smoothstep(HZ, 0.7, y));
+      c = mix(c, vec3(0.008, 0.012, 0.045), smoothstep(0.7, 1.1, y));
+      c += vec3(0.55, 0.24, 0.12) * exp(-max(y - HZ, 0.0) * 10.0) * 0.28;
+      vec2 sg = p * 110.0; vec2 sid = floor(sg);
+      float sh = hash(sid + 3.0);
+      if(sh > 0.986) c += vec3(0.85, 0.9, 1.0) * smoothstep(0.18, 0.0, length(fract(sg) - 0.5)) * (0.5 + 0.5 * sin(t * (1.0 + sh * 3.0) + sh * 50.0)) * smoothstep(HZ + 0.12, 0.6, y) * (1.0 - refl * 0.5);
+      c = lanternLayer(c, p, t, 2.0, cp);
+      float h1 = ridge(p.x, 0.07, 0.06, 1.6, 1.0);
+      c = mix(c, vec3(0.13, 0.09, 0.2) + vec3(0.2, 0.08, 0.04) * exp(-max(h1 - y, 0.0) * 30.0) * 0.4, smoothstep(h1 + AA, h1 - AA, y));
+      c = lanternLayer(c, p, t, 1.0, cp);
+      float h2 = ridge(p.x, 0.025, 0.045, 2.7, 4.0);
+      c = mix(c, vec3(0.06, 0.045, 0.11), smoothstep(h2 + AA, h2 - AA, y));
+      // river banks closing in from both sides
+      float bank = HZ + 0.11 * smoothstep(0.32 * ASP, 0.0, p.x) + 0.08 * smoothstep(0.7 * ASP, ASP, p.x) + 0.012 * noise(vec2(p.x * 30.0, 1.0)) - 0.01;
+      c = mix(c, vec3(0.02, 0.018, 0.045), smoothstep(bank + AA, bank - AA, y));
+      c = lanternLayer(c, p, t, 0.0, cp);
+      for(int k = 0; k < 4; k++){
+        vec4 U = u_lan[k];
+        float age = t - U.z;
+        if(age > 0.0 && age < 45.0){
+          vec2 pos = vec2(U.x * ASP + 0.04 * sin(age * 0.4 + U.w * 6.0) + age * 0.004, U.y + age * 0.034);
+          vec2 q = (p - pos) / (0.075 * (1.0 - min(age / 60.0, 0.5)));
+          float m, d;
+          vec3 lc = lantern(q, 1.0, m, d);
+          float vis = smoothstep(HZ - 0.02, HZ + 0.02, y) * smoothstep(0.0, 1.0, age) * smoothstep(45.0, 38.0, age);
+          c += vec3(1.0, 0.45, 0.12) * exp(-max(d, 0.0) * 3.0) * 0.3 * vis;
+          c = mix(c, lc * 1.1, m * vis);
+        }
+      }
+      c = mix(c, vec3(0.2, 0.12, 0.24), exp(-abs(y - HZ) * 45.0) * 0.35);
+      return c;
+    }
+    void main(){
+      vec2 uv = gl_FragCoord.xy / u_res;
+      ASP = u_res.x / u_res.y;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      float t = u_time;
+      vec3 col;
+      if(uv.y >= HZ){
+        col = world(p, uv, 0.0);
+      } else {
+        float depth = (HZ - uv.y) / HZ;
+        vec2 rp = p * vec2(1.0, 1.0 / (depth + 0.05));
+        float rip = noise(vec2(rp.x * 7.0, rp.y * 0.8 - t * 0.45)) - 0.5;
+        vec2 muv = vec2(uv.x + rip * 0.03 * (0.25 + depth), 2.0 * HZ - uv.y + rip * 0.02 * depth);
+        col = world(vec2(muv.x * ASP, muv.y), muv, 1.0) * vec3(0.62, 0.62, 0.82);
+        col = mix(col, vec3(0.01, 0.015, 0.05), 0.15 + 0.55 * depth);
+        // lotus lamps riding the current, in perspective
+        float z = 0.05 / (HZ - uv.y + 0.015);
+        vec2 wp = vec2((p.x - ASP * 0.5) * z + t * 0.015, z * 1.7 + t * 0.03);
+        vec2 wid = floor(wp * 3.0); vec2 wf = fract(wp * 3.0) - 0.5;
+        float wh = hash(wid + 40.0);
+        if(wh > 0.8){
+          vec2 wo = wf - (vec2(hash(wid + 1.0), hash(wid + 2.0)) - 0.5) * 0.5;
+          wo.y += 0.03 * sin(t * 1.5 + wh * 20.0);
+          float lamp = smoothstep(0.03, -0.03, length(wo * vec2(1.0, 2.2)) - 0.09);
+          float flame = exp(-length((wo - vec2(0.0, 0.05)) * vec2(3.0, 1.6)) * 12.0);
+          vec3 lampC = vec3(1.0, 0.55, 0.65) * 0.5 + vec3(1.0, 0.8, 0.45) * flame * 1.5;
+          col += vec3(1.0, 0.5, 0.2) * exp(-length(wo * vec2(1.0, 2.0)) * 6.0) * 0.18 * smoothstep(0.0, 0.3, depth);
+          col = mix(col, lampC, lamp * smoothstep(0.0, 0.25, depth));
+        }
+      }
+      col = pow(col, vec3(0.95));
+      gl_FragColor = vec4(demoGrade(col, uv, 0.55), 1.0);
+    }
+  `;
+  const lan = new Float32Array(16); for(let i = 0; i < 4; i++) lan[i * 4 + 2] = -100;
+  let slot = 0, ptrOn = 0, layerRef = null;
+  const release = (x, y)=>{ lan[slot * 4] = x; lan[slot * 4 + 1] = y; lan[slot * 4 + 2] = layerRef ? layerRef.now() : 0; lan[slot * 4 + 3] = Math.random(); slot = (slot + 1) % 4; };
+  const offSpin = demoOnSpin(()=> release(0.2 + Math.random() * 0.6, 0.29));
+  layerRef = v2Bespoke(id, FRAG, {
+    scale: 0.5,
+    mat: { bg0:'#060a1c', acc:'#ffb24a' },
+    spin: ['linear-gradient(180deg,#ffd58a,#ff9a3a 55%,#d0502a)', '#2a1004'],
+    frame: (gl, U, t, dt, st)=>{
+      ptrOn = ease(ptrOn, (st && performance.now() - st.moved < 2500) ? 1 : 0, 0.15, dt);
+      gl.uniform2f(U('u_ptr'), st ? st.x / window.innerWidth : 0.5, st ? 1 - st.y / window.innerHeight : 0.5);
+      gl.uniform1f(U('u_ptrOn'), ptrOn);
+      gl.uniform4fv(U('u_lan[0]'), lan);
+    },
+    down: (e)=>{ const u = uvOf(e); release(u[0], Math.max(u[1], 0.3)); },
+    teardown: offSpin
+  });
+};
+
+// ------------------------------------------------------------
+// ОЧЕНЬ ХОРОШИЙ · Море облаков — a real volume: you fly low over a sea of
+// clouds at golden hour, the sun just above the horizon and far peaks
+// standing out of the haze. The clouds are ray-marched (lit tops, shadowed
+// depths, a silver lining toward the sun). The cursor turns your head; a
+// click tears a hole in the cloud sea ahead that you then fly through.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_very_good = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + `
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_look; uniform vec3 u_hole; uniform float u_fly;
+    ${DEMO_GRADE}
+    ${r2GLSL}
+    float hash3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+    float n3(vec3 x){
+      vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(mix(hash3(i), hash3(i + vec3(1.0, 0.0, 0.0)), f.x), mix(hash3(i + vec3(0.0, 1.0, 0.0)), hash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+                 mix(mix(hash3(i + vec3(0.0, 0.0, 1.0)), hash3(i + vec3(1.0, 0.0, 1.0)), f.x), mix(hash3(i + vec3(0.0, 1.0, 1.0)), hash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+    }
+    const vec3 SUN = vec3(-0.3245, 0.1113, 0.9393);
+    // billowing tops: broad swells, then rounded cumulus heads pushed up out of them
+    float topH(vec2 xz){
+      float h = 0.34 * (noise(xz * 0.22) - 0.5) + 0.16 * (noise(xz * 0.7 + 3.0) - 0.5);
+      float heads = noise(xz * 1.3 + 9.0);
+      return -0.08 + h + 0.22 * heads * heads * heads;
+    }
+    float dens(vec3 p, out float below){
+      float top = topH(p.xz);
+      below = top - p.y;
+      if(below < -0.35) return 0.0;
+      vec3 q = p * vec3(1.1, 1.6, 1.1) + vec3(u_time * 0.04, 0.0, 0.0);
+      float n = 0.62 * n3(q) + 0.38 * n3(q * 2.3 + 7.0);
+      float d = below * 5.0 + (n - 0.5) * 1.3;
+      float age = u_time - u_hole.z;
+      if(age > 0.0 && age < 16.0){
+        float R = min(age * 1.1, 2.6) * (1.0 - smoothstep(9.0, 16.0, age));
+        d -= 3.0 * smoothstep(R + 0.7, R - 0.3, length(p.xz - u_hole.xy));
+      }
+      return clamp(d, 0.0, 1.0);
+    }
+    vec3 sky(vec3 rd){
+      float y = rd.y;
+      vec3 c = mix(vec3(1.0, 0.62, 0.36), vec3(0.42, 0.42, 0.68), smoothstep(-0.03, 0.22, y));
+      c = mix(c, vec3(0.08, 0.12, 0.32), smoothstep(0.22, 0.8, y));
+      float sd = max(dot(rd, SUN), 0.0);
+      c += vec3(1.0, 0.5, 0.2) * pow(sd, 8.0) * 0.5 + vec3(1.0, 0.75, 0.45) * pow(sd, 200.0) * 0.6;
+      c += vec3(1.0, 0.9, 0.7) * smoothstep(0.99975, 0.9999, sd) * 2.5;
+      // high cirrus streaks catching the last light
+      float ci = noise(vec2(rd.x / max(rd.y, 0.05) * 2.0, rd.z / max(rd.y, 0.05) * 0.4 + u_time * 0.01));
+      c += vec3(1.0, 0.7, 0.5) * smoothstep(0.55, 0.85, ci) * smoothstep(0.04, 0.2, y) * (1.0 - smoothstep(0.3, 0.7, y)) * 0.18;
+      // far mountains: sharp ridged peaks standing out of the haze, sunlit on the sun side
+      float az = atan(rd.x, rd.z);
+      float rn = 1.0 - abs(2.0 * noise(vec2(az * 4.0, 1.0)) - 1.0);
+      float rn2 = 1.0 - abs(2.0 * noise(vec2(az * 11.0, 4.0)) - 1.0);
+      float ph = 0.004 + 0.045 * pow(rn, 4.0) + 0.008 * rn2 * rn;
+      // hazy blue-violet silhouettes, a warm rim where the sun grazes the crest
+      vec3 mc = mix(vec3(0.5, 0.42, 0.62), vec3(0.38, 0.33, 0.55), smoothstep(0.0, 0.05, ph - y));
+      mc += vec3(1.0, 0.6, 0.35) * smoothstep(0.004, 0.0, ph - y) * 0.25 * (0.4 + 0.6 * pow(sd, 3.0));
+      c = mix(c, mix(mc, c, 0.35), smoothstep(ph + 0.0015, ph - 0.0015, y));
+      return c;
+    }
+    void main(){
+      vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
+      vec3 ro = vec3(0.0, 0.7, u_fly);
+      vec3 rd = normalize(vec3(uv, 1.5));
+      rd.yz = r2(rd.yz, 0.13 - u_look.y * 0.22);
+      rd.xz = r2(rd.xz, -u_look.x * 0.55);
+      vec3 col = sky(rd);
+      if(rd.y < -0.002){
+        float t = (0.45 - ro.y) / rd.y;
+        float tEnd = min((-1.2 - ro.y) / rd.y, 34.0);
+        t += hash(gl_FragCoord.xy + fract(u_time)) * 0.12;
+        vec4 sum = vec4(0.0);
+        float fs = pow(max(dot(rd, SUN), 0.0), 5.0);
+        vec3 haze = vec3(0.98, 0.72, 0.52);
+        for(int i = 0; i < 40; i++){
+          if(t > tEnd || sum.a > 0.98) break;
+          vec3 p = ro + rd * t;
+          float below;
+          float d = dens(p, below);
+          if(d > 0.01){
+            float lightDepth = clamp(below, 0.0, 2.0);
+            // light from a low sun: the sun-facing flank of a head is lit, the far side is in shade
+            float sideLit = clamp(0.5 + 4.0 * (topH(p.xz - SUN.xz * 0.25) - topH(p.xz)), 0.0, 1.0);
+            float dif = exp(-lightDepth * 6.0) * (0.25 + 0.75 * sideLit);
+            vec3 lin = vec3(0.24, 0.24, 0.46) * (0.4 + 0.6 * exp(-lightDepth * 2.0))
+                     + vec3(1.0, 0.66, 0.38) * dif * 2.2
+                     + vec3(1.0, 0.72, 0.45) * fs * (1.0 - d) * 1.4;
+            vec4 c = vec4(vec3(0.95, 0.92, 0.96) * lin, d * 0.6);
+            c.rgb = mix(c.rgb, haze, (1.0 - exp(-t * 0.045)) * 0.85);
+            c.rgb *= c.a;
+            sum += c * (1.0 - sum.a);
+          }
+          t += max(0.07, 0.035 * t);
+        }
+        col = col * (1.0 - sum.a) + sum.rgb;
+      }
+      col = 1.0 - exp(-col * 1.35);
+      col = mix(col, col * col * (3.0 - 2.0 * col), 0.35);
+      gl_FragColor = vec4(demoGrade(col, gl_FragCoord.xy / u_res, 0.5), 1.0);
+    }
+  `;
+  const look = { x: 0, y: 0 }, hole = [0, 0, -100];
+  let fly = 0, layerRef = null;
+  const rot = (a, b, ang)=>{ const c = Math.cos(ang), s = Math.sin(ang); return [c * a - s * b, s * a + c * b]; };
+  layerRef = v2Bespoke(id, FRAG, {
+    scale: 0.4,
+    mat: { bg0:'#2a2a48', acc:'#ffcf8a' },
+    spin: ['linear-gradient(180deg,#ffe2b0,#ffb070 55%,#d0705a)', '#2a1408'],
+    frame: (gl, U, t, dt, st)=>{
+      const tx = st && performance.now() - st.moved < 6000 ? (st.x / window.innerWidth - 0.5) : 0.12 * Math.sin(t * 0.05);
+      const ty = st && performance.now() - st.moved < 6000 ? (0.5 - st.y / window.innerHeight) : 0.05 * Math.sin(t * 0.04);
+      look.x = ease(look.x, tx, 0.3, dt); look.y = ease(look.y, ty, 0.3, dt);
+      fly += dt * 0.35;
+      gl.uniform2f(U('u_look'), look.x, look.y);
+      gl.uniform1f(U('u_fly'), fly);
+      gl.uniform3f(U('u_hole'), hole[0], hole[1], hole[2]);
+    },
+    down: (e)=>{
+      // the same camera as the shader: where does this ray meet the cloud tops?
+      const h = window.innerHeight, w = window.innerWidth;
+      let x = (e.clientX - w / 2) / h, y = (h / 2 - e.clientY) / h, z = 1.5;
+      const n = Math.hypot(x, y, z); x /= n; y /= n; z /= n;
+      [y, z] = rot(y, z, 0.13 - look.y * 0.22);
+      [x, z] = rot(x, z, -look.x * 0.55);
+      if(y >= -0.02) return;
+      const tt = Math.min(14, (0.0 - 0.7) / y);
+      hole[0] = x * tt; hole[1] = fly + z * tt; hole[2] = layerRef ? layerRef.now() : 0;
+    }
+  });
+};
+
+// ------------------------------------------------------------
+// СУПЕРСКИЙ · Горизонт событий — the first class allowed to rebuild the
+// interface (never the gameplay). You are in orbit around a black hole,
+// flying low over its accretion disk, inside a field of tumbling shards.
+//  * the hole: a pure black shadow with a razor-thin photon ring, the far
+//    side of the disk bent up into an arch over it, a white-hot inner disk
+//    whose approaching side blazes blue-white and whose receding side sinks
+//    into deep red, two relativistic jets;
+//  * space: deep black, sharp coloured stars with halos, nebulae with dark
+//    dust lanes, a galaxy behind the hole smeared into arcs by the lens;
+//  * the shards: dark, with incandescent edges, from gravel to monoliths,
+//    each ring orbiting at its own speed; a few of them float right by you;
+//  * «Пульс чёрной дыры»: three clicks on empty space, once a minute,
+//    each stronger than the last. One: the hole throbs. Two: a shockwave.
+//    Three: the hole breathes in (the space around it is pinched, the nearby
+//    shards are torn from their orbits and swallowed), then a loud shockwave
+//    tears outward, throws the swallowed shards back out white-hot (some of
+//    them straight past you) and shakes the whole interface;
+//  * the side buttons leave their corners and park on a ring around the hole,
+//    clear of everything else, always on top and always pressable;
+//  * holding feeds the hole mass; every spin flares the disk; the spin's
+//    preview cards are spaghettified; switching it on is a dive from far away.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_super = function(id){
+  const NFREE = 10;
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
+    uniform vec2 u_res; uniform float u_time;
+    uniform vec3 u_ro; uniform vec3 u_fw; uniform vec3 u_rt; uniform vec3 u_up;
+    uniform float u_mass; uniform float u_flare; uniform float u_knot; uniform float u_intro;
+    uniform vec3 u_gal; uniform vec2 u_hole; uniform float u_inhale; uniform vec2 u_shock; uniform float u_shake;
+    uniform vec3 u_wave;
+    uniform vec4 u_free[${NFREE}]; uniform vec4 u_freeR[${NFREE}];
+    ${DEMO_GRADE}
+    ${r2GLSL}
+    float hash3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+    float pnoise(vec2 p, float per){
+      vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      float x0 = mod(i.x, per), x1 = mod(i.x + 1.0, per);
+      return mix(mix(hash(vec2(x0, i.y)), hash(vec2(x1, i.y)), f.x), mix(hash(vec2(x0, i.y + 1.0)), hash(vec2(x1, i.y + 1.0)), f.x), f.y);
+    }
+    float pfbm(vec2 p, float per){
+      float v = 0.0, a = 0.5;
+      for(int i = 0; i < 5; i++){ v += a * pnoise(p, per); p = p * 2.0 + vec2(0.0, 17.3); per *= 2.0; a *= 0.5; }
+      return v;
+    }
+    float plasma(vec2 q){
+      float base = pfbm(q, 14.0);
+      float fil = 1.0 - abs(2.0 * pnoise(q * vec2(2.0, 3.0) + vec2(0.0, 5.0), 28.0) - 1.0);
+      float fil2 = 1.0 - abs(2.0 * pnoise(q * vec2(4.0, 7.0) + vec2(0.0, 11.0), 56.0) - 1.0);
+      return base * 0.75 + fil * fil * fil * 0.5 + fil2 * fil2 * fil2 * 0.3;
+    }
+    // deep, contrasty space: black, sharp coloured stars with soft halos, nebulae cut by dust
+    vec3 space(vec3 d){
+      vec3 c = vec3(0.0015, 0.001, 0.004);
+      float band = d.y * 1.8 + 0.4 * sin(d.x * 1.6 + d.z * 0.7);
+      float bandK = exp(-band * band * 1.6);
+      float n1 = fbm(d.xz * 2.2 + d.y * 1.5);
+      float n2 = fbm(d.zy * 3.0 + 7.0);
+      float dust = smoothstep(0.42, 0.68, fbm(d.xy * 5.5 + d.z * 2.0 + 2.0));
+      vec3 neb = vec3(0.42, 0.1, 0.5) * n1 * n1 * 1.1 + vec3(0.03, 0.3, 0.38) * smoothstep(0.5, 0.85, n2) * 0.8 + vec3(0.5, 0.16, 0.05) * smoothstep(0.6, 0.9, n1) * 0.5;
+      c += neb * bandK * (1.0 - dust * 0.9) * 0.55;
+      for(int k = 0; k < 3; k++){
+        float fk = float(k);
+        float S = k == 0 ? 260.0 : (k == 1 ? 120.0 : 46.0);
+        vec3 g = d * S; vec3 id = floor(g);
+        float h = hash3(id + fk * 13.0);
+        float thr = k == 0 ? 0.982 - bandK * 0.03 : (k == 1 ? 0.992 : 0.9975);
+        if(h > thr){
+          vec3 f = fract(g) - 0.5 - (vec3(hash3(id + 3.0), hash3(id + 5.0), hash3(id + 7.0)) - 0.5) * 0.5;
+          float r = length(f);
+          float b = (h - thr) / (1.0 - thr);
+          vec3 sc = mix(vec3(1.0, 0.66, 0.42), vec3(0.62, 0.78, 1.0), hash3(id + 1.0));
+          sc = mix(sc, vec3(1.0), 0.4);
+          c += sc * (smoothstep(0.09, 0.0, r) * 2.0 + exp(-r * 14.0) * 0.25 * fk) * b * (0.6 + fk * 0.9) * (0.85 + 0.15 * sin(u_time * (1.0 + h * 3.0) + h * 40.0));
+        }
+      }
+      return c;
+    }
+    vec3 galaxy(vec3 d){
+      float c0 = dot(d, u_gal);
+      if(c0 < 0.94) return vec3(0.0);
+      vec3 gx = normalize(cross(u_gal, vec3(0.3, 1.0, 0.1)));
+      vec3 gy = cross(u_gal, gx);
+      vec2 q = r2(vec2(dot(d, gx), dot(d, gy)) / c0, 0.6);
+      q.y *= 1.8;
+      float r = length(q);
+      float th = atan(q.y, q.x);
+      float arms = 0.5 + 0.5 * cos(2.0 * th - log(r + 0.002) * 3.4 - u_time * 0.01);
+      arms = arms * arms * arms;
+      float dust = fbm(q * 45.0);
+      float disk = exp(-r * 9.0);
+      vec3 col = vec3(1.0, 0.82, 0.55) * exp(-r * 60.0) * 2.4;
+      col += mix(vec3(0.5, 0.62, 1.0), vec3(1.0, 0.5, 0.72), smoothstep(0.55, 0.85, dust)) * disk * arms * (0.5 + 0.9 * dust) * 1.3;
+      return col * smoothstep(0.94, 0.97, c0);
+    }
+    vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+
+    // ---------------- the shards ----------------
+    float sdBox(vec3 p, vec3 b){ vec3 q = abs(p) - b; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0); }
+    vec3 gQ; vec3 gB; float gSeed; float gHeat;
+    float shards(vec3 p, float N, float r0, float dr, float nr, float y0, float dy, float ny, float sMin, float sMax, float layer, float shockR, inout float best){
+      float rr = length(p.xz);
+      float band = max(max(r0 - rr, rr - (r0 + nr * dr)), max(y0 - p.y, p.y - (y0 + ny * dy)));
+      if(band > 0.0) return band + 0.05;
+      float ri = floor((rr - r0) / dr);
+      float rc = r0 + (ri + 0.5) * dr;
+      float om = 2.2 / (rc * sqrt(rc));
+      float s = fract((atan(p.z, p.x) - om * u_time) / 6.2831853) * N;
+      float si = floor(s);
+      float yi = floor((p.y - y0) / dy);
+      float yc = y0 + (yi + 0.5) * dy;
+      float arcW = 6.2831853 * rc / N;
+      vec3 q = vec3((fract(s) - 0.5) * arcW, p.y - yc, rr - rc);
+      vec3 lim = vec3(arcW, dy, dr) * 0.5;
+      float dCell = min(lim.x - abs(q.x), min(lim.y - abs(q.y), lim.z - abs(q.z)));
+      vec3 id = vec3(si, ri, yi + layer * 7.0);
+      float h = hash3(id);
+      if(h < 0.5) return max(dCell, 0.0) + 0.04;
+      float angW = (si + 0.5) / N * 6.2831853 + om * u_time;
+      if(length(vec3(rc * cos(angW), yc, rc * sin(angW)) - u_ro) < 1.8 + sMax * 4.0) return max(dCell, 0.0) + 0.04;
+      q -= (vec3(hash3(id + 1.0), hash3(id + 2.0), hash3(id + 3.0)) - 0.5) * lim * 0.4;
+      // the hole tugs every shard toward itself while it breathes in; the shockwave kicks them back
+      float kick = exp(-abs(rc - shockR) * 0.8) * u_shock.y;
+      q.z += (u_inhale * 0.3 - kick * 0.35) * lim.z;
+      float spin = 1.0 + kick * 6.0 + u_inhale * 3.0;
+      q.xy = r2(q.xy, h * 6.28 + u_time * (h - 0.5) * 0.5 * spin);
+      q.yz = r2(q.yz, hash3(id + 4.0) * 6.28 + u_time * (hash3(id + 5.0) - 0.5) * 0.4 * spin);
+      q.xz = r2(q.xz, hash3(id + 6.0) * 6.28);
+      vec3 b = vec3(sMin + (sMax - sMin) * hash3(id + 7.0), sMin + (sMax - sMin) * (0.4 + 0.6 * hash3(id + 8.0)), sMin + (sMax - sMin) * 0.6 * hash3(id + 9.0));
+      float d = sdBox(q, b) - 0.006;
+      if(d < best){ best = d; gQ = q; gB = b; gSeed = h; gHeat = kick; }
+      return min(d, max(dCell, 0.0) + 0.04);
+    }
+    float map(vec3 p, float shockR){
+      float best = 1e3;
+      float d = 1e3;
+      d = min(d, shards(p, 96.0, 11.0, 1.5, 7.0, 0.3, 1.1, 3.0, 0.05, 0.17, 0.0, shockR, best));
+      d = min(d, shards(p, 22.0, 11.0, 3.5, 3.0, 0.7, 3.4, 1.0, 0.25, 0.6, 1.0, shockR, best));
+      // the free shards near you: these are the ones the pulse swallows and throws back
+      for(int k = 0; k < ${NFREE}; k++){
+        vec4 F = u_free[k];
+        if(F.w < 0.01) continue;
+        vec3 q = p - F.xyz;
+        float bb = length(q) - F.w * 2.0;
+        if(bb > 0.3){ d = min(d, bb); continue; }
+        vec4 R = u_freeR[k];
+        q.xy = r2(q.xy, R.x); q.yz = r2(q.yz, R.y); q.xz = r2(q.xz, R.z);
+        float fk = float(k);
+        vec3 b = F.w * vec3(1.0, 0.65 + 0.6 * fract(fk * 0.37), 0.5 + 0.45 * fract(fk * 0.61));
+        float df = sdBox(q, b) - 0.008;
+        if(df < best){ best = df; gQ = q; gB = b; gSeed = fract(fk * 0.53); gHeat = R.w; }
+        d = min(d, df);
+      }
+      return d;
+    }
+    vec3 nrm(vec3 p, float shockR){
+      vec2 k = vec2(1.0, -1.0); float e = 0.0025;
+      return normalize(k.xyy * map(p + k.xyy * e, shockR) + k.yyx * map(p + k.yyx * e, shockR) + k.yxy * map(p + k.yxy * e, shockR) + k.xxx * map(p + k.xxx * e, shockR));
+    }
+
+    void main(){
+      vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
+      float t = u_time;
+      // the whole view shudders after the blast
+      uv += vec2(sin(t * 91.0), cos(t * 77.0)) * u_shake * 0.012;
+      // breathing in pinches space toward the hole
+      vec2 hv = uv - u_hole;
+      uv -= hv * u_inhale * 0.16 * exp(-dot(hv, hv) * 1.2);
+      float wAge = t - u_wave.z, wring = 0.0;
+      if(wAge > 0.0 && wAge < 3.5){
+        vec2 wc = (u_wave.xy * u_res - 0.5 * u_res) / u_res.y;
+        vec2 dv = uv - wc; float dd = length(dv) + 1e-4;
+        float b = dd - wAge * 0.95;
+        wring = exp(-b * b * 40.0) * exp(-wAge * 0.8);
+        uv += dv / dd * sin(b * 34.0) * wring * 0.035;
+      }
+      float M = u_mass;
+      const float FOCAL = 1.6;
+      vec3 dir = normalize(u_fw * FOCAL + u_rt * uv.x + u_up * uv.y);
+      vec3 pos = u_ro;
+      vec3 col = vec3(0.0); float alpha = 0.0; float hit = 0.0; float captured = 0.0;
+      vec3 ring = vec3(0.0);
+      float inner = 3.0 * M, outer = 30.0;
+      float knotAge = t - u_knot;
+      float sAge = t - u_shock.x;
+      float shockR = (sAge > 0.0 && sAge < 8.0) ? sAge * 16.0 : -100.0;
+      float shockK = (sAge > 0.0 && sAge < 8.0) ? u_shock.y * exp(-sAge * 0.3) : 0.0;
+      float p1 = fract(t / 20.0), p2 = fract(t / 20.0 + 0.5);
+      float wa = 1.0 - abs(2.0 * p1 - 1.0);
+      float travelled = 0.0;
+      for(int i = 0; i < 200; i++){
+        float r = length(pos);
+        if(r < M){ alpha = 1.0; captured = 1.0; break; }
+        if(r > 70.0) break;
+        float hg = clamp(0.05 * r, 0.02, 1.6);
+        float ds = 1e3;
+        if(travelled < 24.0){
+          ds = map(pos, shockR);
+          if(ds < 0.0012 * (1.0 + travelled)){ hit = 1.0; break; }
+        }
+        float h = min(hg, max(ds * 0.85, 0.004));
+        vec3 Lm = cross(pos, dir);
+        vec3 acc = -1.5 * M * dot(Lm, Lm) * pos / (r * r * r * r * r);
+        dir = normalize(dir + acc * h);
+        // the shockwave bends light as it passes
+        if(shockK > 0.0){
+          float sb = r - shockR;
+          dir = normalize(dir + normalize(pos) * exp(-sb * sb * 2.0) * shockK * 0.05 * h);
+        }
+        vec3 np = pos + dir * h;
+        travelled += h;
+        float fade = 1.0 - alpha;
+        // photon ring: light that skims the photon sphere and escapes; collected apart and only
+        // kept for rays that get away, so the shadow itself stays perfectly black
+        ring += vec3(1.0, 0.82, 0.6) * exp(-abs(r - 1.5 * M) * (30.0 + u_inhale * 20.0) / M) * h * (0.8 + 1.2 * u_inhale) * fade;
+        float rxz = length(pos.xz);
+        float haze = exp(-abs(pos.y) * 3.0) * smoothstep(outer, inner, rxz) * smoothstep(inner * 0.7, inner, rxz);
+        col += vec3(1.0, 0.45, 0.16) * haze * h * 0.009 * (1.0 + u_flare * 2.0) * fade;
+        // the shockwave itself: a glowing shell racing out of the hole
+        if(shockK > 0.0) col += vec3(1.0, 0.86, 0.7) * exp(-abs(r - shockR) * 1.6) * shockK * h * 0.09 * fade;
+        float ay = abs(pos.y);
+        if(rxz < 3.0 && ay > M && ay < 60.0){
+          float w = 0.14 + ay * 0.05;
+          float core = exp(-rxz * rxz / (w * w));
+          float flow = noise(vec2(rxz * 5.0, ay * 0.6 - t * 5.0));
+          float jet = core * (0.3 + 0.7 * flow) * exp(-ay * 0.05) * smoothstep(M, M * 3.0, ay);
+          float kd = ay - knotAge * 10.0;
+          float knot = (knotAge > 0.0 && knotAge < 6.0) ? exp(-kd * kd * 0.4) * exp(-knotAge * 0.35) * 6.0 : 0.0;
+          col += vec3(0.45, 0.65, 1.0) * jet * (1.0 + knot + shockK * 3.0) * h * 0.28 * fade;
+        }
+        if(pos.y * np.y < 0.0){
+          vec3 cp = mix(pos, np, pos.y / (pos.y - np.y));
+          float rr = length(cp.xz);
+          if(rr > inner && rr < outer){
+            float x = (rr - inner) / (outer - inner);
+            float a = atan(cp.z, cp.x);
+            float om = 2.2 / (rr * sqrt(rr));
+            float lr = log(rr);
+            float ua = fract((a - om * p1 * 20.0) / 6.2831853);
+            float ub = fract((a - om * p2 * 20.0) / 6.2831853 + 0.37);
+            float pl = mix(plasma(vec2(ub * 14.0, lr * 26.0 + 9.1)), plasma(vec2(ua * 14.0, lr * 26.0)), wa);
+            float temp = inner / rr;
+            float e = (0.02 + 1.3 * pl * pl * pl) * pow(temp, 0.5) * smoothstep(0.0, 0.02, x) * smoothstep(1.0, 0.6, x);
+            e *= 1.0 + 2.5 * smoothstep(0.55, 1.0, temp);
+            vec3 bb = mix(vec3(1.0, 0.26, 0.05), vec3(1.0, 0.55, 0.18), smoothstep(0.15, 0.5, temp));
+            bb = mix(bb, vec3(1.0, 0.93, 0.8), smoothstep(0.55, 1.0, temp) * (0.6 + 0.4 * pl));
+            // the shockwave lights the disk as it runs over it
+            if(shockK > 0.0) e += exp(-abs(rr - shockR) * 1.2) * shockK * 2.5;
+            e *= 1.0 + u_inhale * 0.8 * smoothstep(0.5, 1.0, temp);
+            vec3 vel = normalize(vec3(-cp.z, 0.0, cp.x));
+            float dop = 1.0 + 0.8 * dot(vel, -dir);
+            bb = mix(bb, vec3(0.8, 0.9, 1.0) * 1.15, clamp((dop - 1.1) * 1.3, 0.0, 0.65));
+            bb = mix(bb, vec3(0.6, 0.06, 0.03), clamp((0.95 - dop) * 1.8, 0.0, 0.7));
+            float beam = min(dop * dop * dop * dop * 0.7, 2.4);
+            e *= beam * (1.0 + u_flare * 1.6);
+            col += bb * e * 1.35 * fade;
+            alpha += clamp(e * 0.9, 0.0, 0.94) * fade;
+            if(alpha > 0.97) break;
+          }
+        }
+        pos = np;
+      }
+      col += ring * (1.0 - captured);
+      if(hit > 0.5){
+        map(pos, shockR);
+        vec3 q = gQ, bx = gB; float seed = gSeed, heat = gHeat;
+        vec3 n = nrm(pos, shockR);
+        float dist = length(pos - u_ro);
+        float under = clamp(-n.y, 0.0, 1.0);
+        float sky = clamp(n.y, 0.0, 1.0);
+        float toHole = clamp(dot(n, normalize(-pos)), 0.0, 1.0);
+        float rim = pow(1.0 - clamp(dot(n, -dir), 0.0, 1.0), 3.0);
+        float hk = exp(-max(pos.y, 0.0) * 0.45) * smoothstep(outer, inner, length(pos.xz));
+        vec3 diskLight = vec3(1.0, 0.5, 0.2) * under * hk * 1.7 * (1.0 + u_flare);
+        float shell = shockK > 0.0 ? exp(-abs(length(pos) - shockR) * 1.4) * shockK : 0.0;
+        vec3 dd = bx - abs(q);
+        float e1 = dd.x + dd.y + dd.z - min(dd.x, min(dd.y, dd.z)) - max(dd.x, max(dd.y, dd.z));
+        float edge = smoothstep(0.025 + dist * 0.0018, 0.0, e1);
+        // basalt faces with a faint specular sheen of the disk and hairline cracks of heat
+        float crack = 1.0 - abs(2.0 * noise(q.xy * 9.0 + q.z * 5.0 + seed * 9.0) - 1.0);
+        crack = pow(crack, 14.0);
+        vec3 alb = vec3(0.04, 0.036, 0.04) * (0.8 + 0.4 * noise(q.xy * 30.0 + q.z * 9.0));
+        vec3 c = alb * (diskLight * 2.0 + vec3(0.08, 0.1, 0.22) * sky + vec3(1.0, 0.7, 0.45) * toHole * 0.4);
+        vec3 refl = reflect(dir, n);
+        c += vec3(1.0, 0.55, 0.25) * pow(clamp(-refl.y, 0.0, 1.0), 6.0) * hk * 0.25;
+        float hot = clamp(heat + shell, 0.0, 2.0);
+        vec3 edgeCol = mix(vec3(1.0, 0.4, 0.08), vec3(1.0, 0.92, 0.8), clamp(hot, 0.0, 1.0));
+        c += edgeCol * edge * (0.4 + 1.5 * under * hk + hot * 3.0) * (0.6 + seed * 0.8);
+        c += vec3(1.0, 0.35, 0.06) * crack * (0.25 + hot * 2.0) * (0.3 + under * hk);
+        c += vec3(1.0, 0.8, 0.6) * hot * 0.25;
+        c += vec3(1.0, 0.6, 0.3) * rim * 0.15 * hk;
+        c = mix(c, vec3(0.08, 0.035, 0.03), 1.0 - exp(-dist * 0.03));
+        col += c * (1.0 - alpha);
+      } else {
+        col += (space(dir) + galaxy(dir)) * (1.0 - alpha) * (1.0 - u_inhale * 0.6);
+      }
+      col += vec3(0.6, 0.72, 1.0) * wring * 0.12;
+      // the blast flash
+      if(sAge > 0.0 && sAge < 1.5) col += vec3(1.0, 0.92, 0.85) * exp(-sAge * 5.0) * u_shock.y * 1.2;
+      col = aces(col * 1.0);
+      col = mix(col, col * col * (3.0 - 2.0 * col), 0.35);
+      col = mix(col, vec3(1.0, 0.96, 0.9), (1.0 - smoothstep(0.0, 0.12, u_intro)));
+      gl_FragColor = vec4(demoGrade(col, gl_FragCoord.xy / u_res, 0.8), 1.0);
+    }
+  `;
+  const W = ()=> window.innerWidth, H = ()=> window.innerHeight;
+  const reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const FOCAL = 1.6;
+  const smooth = (x)=>{ x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+  const outCubic = (x)=>{ x = Math.max(0, Math.min(1, x)); return 1 - Math.pow(1 - x, 3); };
+  const norm = (v)=>{ const n = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / n, v[1] / n, v[2] / n]; };
+  const look = { x: 0, y: 0 };
+  let mass = 0.05, throb = 0, flare = 0, knotAt = -100, layerRef = null, born = null, lastT = 0, shake = 0;
+  const shock = { t: -100, k: 0 };
+  const wave = { x: 0.5, y: 0.5, t: -100, px: 0, py: 0, at: -1e9 };
+  const cam = { ro: [16, 1.5, 0], fw: [0, 0, 1], rt: [1, 0, 0], up: [0, 1, 0] };
+  const hole = { x: W() / 2, y: H() / 2, ok: false };
+  const sfx = (fn)=>{ try{ fn(AMB); }catch(e){} };
+
+  // ---- the free shards that the pulse swallows and throws back ----
+  const free = [];
+  for(let i = 0; i < NFREE; i++){
+    free.push({ rel: 0.04 + Math.random() * 0.45, dr: -7 + Math.random() * 5.5, y: 0.4 + Math.random() * 2.6, size: 0.12 + Math.random() * 0.26,
+      rot: [Math.random() * 6.3, Math.random() * 6.3, Math.random() * 6.3], spin: [(Math.random() - 0.5) * 0.8, (Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * 0.4],
+      ej: null, pos: [0, 0, 0], heat: 0, gone: false });
+  }
+  const freeA = new Float32Array(NFREE * 4), freeR = new Float32Array(NFREE * 4);
+
+  // ---- «Пульс чёрной дыры»: three clicks, once a minute, each stronger ----
+  const pulse = { n: 0, last: -100, cooldownUntil: -1, inhaleAt: -100, blastAt: -100 };
+  const chip = document.createElement('div');
+  chip.id = 'demo-super-pulse'; chip.setAttribute('aria-live', 'polite');
+  demoDom(chip);
+  let chipKey = '';
+  const renderChip = (t)=>{
+    const cd = pulse.cooldownUntil - t;
+    const pips = [0, 1, 2].map(i=> `<i class="${cd > 0 ? 'cd' : (i < pulse.n ? 'on' : '')}"></i>`).join('');
+    const line = cd > 0 ? `перезарядка ${Math.floor(cd / 60)}:${String(Math.ceil(cd) % 60).padStart(2, '0')}`
+      : pulse.n === 0 ? 'клик по космосу ×3' : pulse.n === 1 ? 'ещё дважды' : 'ещё раз!';
+    const key = pips + line;
+    if(key === chipKey) return;
+    chipKey = key;
+    chip.innerHTML = `<b>Пульс чёрной дыры</b><span class="dsp-pips">${pips}</span><span class="dsp-line">${line}</span>`;
+    chip.classList.toggle('dsp-ready', cd <= 0);
+  };
+  const sendWave = (t)=>{
+    if(!hole.ok) return;
+    wave.x = hole.x / W(); wave.y = 1 - hole.y / H(); wave.t = t;
+    wave.px = hole.x; wave.py = hole.y; wave.at = performance.now();
+  };
+  const firePulse = (t)=>{
+    if(t < pulse.cooldownUntil || t < pulse.blastAt + 2) return;
+    if(t - pulse.last > 15) pulse.n = 0;
+    pulse.n++; pulse.last = t;
+    if(pulse.n === 1){
+      // a throb: the hole swells for a moment
+      throb = 0.25; flare = Math.max(flare, 0.6);
+      shock.t = t; shock.k = 0.25; sendWave(t);
+      sfx(A=>{ A.duck(0.5, 1.6); A.fx.impact(0.55, 0.9); });
+    } else if(pulse.n === 2){
+      throb = 0.45; flare = Math.max(flare, 1);
+      sfx(A=>{ A.duck(0.35, 2.5); A.fx.swell(0.4, 0.3); });
+      setTimeout(()=>{ const tt = layerRef ? layerRef.now() : t; shock.t = tt; shock.k = 0.6; sendWave(tt); shake = Math.max(shake, 0.35); sfx(A=>{ A.fx.impact(0.85, 1.2); A.fx.braam(0.22, 2.4, 41); }); }, 400);
+    } else {
+      // breathe in, then the blast
+      pulse.inhaleAt = t; pulse.blastAt = t + 1.7; pulse.n = 0; pulse.cooldownUntil = t + 60;
+      // the hole breathes in with a roar, then the blast
+      sfx(A=>{ A.duck(0.08, 8); A.fx.roar(1.7, 0.75); });
+      free.forEach(f=>{ f.inhale = { from: f.pos.slice(), at: t, spiral: (Math.random() - 0.5) * 2 }; });
+    }
+    renderChip(t);
+  };
+  const blast = (t)=>{
+    shock.t = t; shock.k = 1.0; sendWave(t); shake = 1.0; flare = 2.0; knotAt = t; throb = 0;
+    sfx(A=>{ A.fx.blast(1.0); A.fx.braam(0.32, 4.5, 36.7); });
+    // the swallowed shards come back out white-hot; a few fly straight at you
+    const toCam = norm(cam.ro);
+    free.forEach((f, i)=>{
+      let d = norm([Math.random() - 0.5, (Math.random() - 0.4) * 0.8, Math.random() - 0.5]);
+      if(i % 3 === 0){ const side = norm([-toCam[2], 0, toCam[0]]); const s = (Math.random() - 0.5) * 0.5; d = norm([toCam[0] + side[0] * s, toCam[1] + 0.12 + Math.random() * 0.15, toCam[2] + side[2] * s]); }
+      f.inhale = null; f.gone = false;
+      f.ej = { d, at: t, v: 16 + Math.random() * 16, spin: [(Math.random() - 0.5) * 14, (Math.random() - 0.5) * 12, (Math.random() - 0.5) * 10] };
+    });
+  };
+  renderChip(0);
+
+  // ---- the side buttons park on a ring around the hole: still, on top, always pressable ----
+  const SLOTS = { 'inventory-btn': -36, 'quests-btn': -13, 'words-btn': 10, 'brewery-btn': 33, 'dev-btn': 142, 'anvil-btn': 161, 'settings-btn': 180, 'save-btn': 199, 'ui-toggle-btn': 218 };
+  const parkOn = W() >= 760 && H() >= 520;
+  const items = [];
+  if(parkOn){
+    Object.keys(SLOTS).forEach(bid=>{
+      const el = document.getElementById(bid);
+      if(!el) return;
+      // measure the button where it really lives, without whatever animation it is in right now
+      const prev = { transform: el.style.transform, opacity: el.style.opacity, zIndex: el.style.zIndex, transition: el.style.transition, pointerEvents: el.style.pointerEvents };
+      el.style.transition = 'none'; el.style.transform = 'none';
+      const r = el.getBoundingClientRect();
+      if(r.width < 8){ el.style.transform = prev.transform; el.style.transition = prev.transition; return; }
+      items.push({ el, ang: SLOTS[bid] * Math.PI / 180, cx: r.left + r.width / 2, cy: r.top + r.height / 2, seed: Math.random() * 6, prev });
+    });
+    items.forEach(it=>{ it.el.style.transition = 'none'; it.el.classList.add('demo-orbiter'); });
+  }
+  document.body.classList.add('demo-super-ui');
+  const waveKick = (x, y)=>{
+    const age = (performance.now() - wave.at) / 1000;
+    if(age < 0 || age > 2.5) return 0;
+    const d = Math.hypot(x - wave.px, y - wave.py) - age * 1100;
+    return Math.exp(-d * d / (2 * 80 * 80)) * Math.exp(-age * 1.1) * Math.sin(d * 0.05);
+  };
+  const project = (p)=>{
+    const v = [p[0] - cam.ro[0], p[1] - cam.ro[1], p[2] - cam.ro[2]];
+    const z = v[0] * cam.fw[0] + v[1] * cam.fw[1] + v[2] * cam.fw[2];
+    if(z < 0.1) return null;
+    const x = v[0] * cam.rt[0] + v[1] * cam.rt[1] + v[2] * cam.rt[2];
+    const y = v[0] * cam.up[0] + v[1] * cam.up[1] + v[2] * cam.up[2];
+    return { x: W() / 2 + x / z * FOCAL * H(), y: H() / 2 - y / z * FOCAL * H() };
+  };
+  const placeUi = (t, life)=>{
+    const hp = project([0, 0, 0]);
+    hole.ok = !!hp; if(hp){ hole.x = hp.x; hole.y = hp.y; }
+    const sk = shake * 7;
+    const jx = sk ? Math.sin(t * 91) * sk : 0, jy = sk ? Math.cos(t * 77) * sk : 0;
+    if(items.length){
+      const born01 = reduce ? 1 : outCubic((life - 1.6) / 2.6);
+      const cx = W() / 2, cy = H() * 0.52;
+      const rx = Math.min(W() * 0.4, 540), ry = Math.min(H() * 0.33, 270);
+      items.forEach(it=>{
+        // fly out of the singularity onto the slot, then just float there
+        const a = it.ang + (1 - born01) * 3.0;
+        const k = born01;
+        const bob = reduce ? 0 : Math.sin(t * 0.9 + it.seed) * 3;
+        const X = cx + Math.cos(a) * rx * k, Y = cy + Math.sin(a) * ry * k + bob;
+        const kick = waveKick(X, Y);
+        const tilt = Math.cos(a) * -14 * k;
+        it.el.style.transform = `translate3d(${(X - it.cx + jx).toFixed(1)}px, ${(Y - it.cy + jy).toFixed(1)}px, 0) perspective(600px) rotateY(${tilt.toFixed(1)}deg) rotate(${(kick * 9).toFixed(2)}deg) scale(${((0.3 + 0.7 * k) * (1 + 0.2 * kick)).toFixed(3)})`;
+        it.el.style.opacity = (0.15 + 0.85 * k).toFixed(3);
+        it.el.style.zIndex = '80';
+        it.el.style.pointerEvents = k < 0.98 ? 'none' : it.prev.pointerEvents;
+      });
+    }
+    const kc = waveKick(W() - 130, 50);
+    chip.style.transform = (kc || sk) ? `translate(${jx.toFixed(1)}px, ${jy.toFixed(1)}px) scale(${(1 + 0.15 * kc).toFixed(3)}) rotate(${(kc * 5).toFixed(2)}deg)` : '';
+  };
+  const offSpin = demoOnSpin(()=>{ flare = Math.max(flare, 1); knotAt = layerRef ? layerRef.now() : 0; });
+  const R0 = 16, OMEGA = 0.9 * 2.2 / Math.pow(R0, 1.5);
+  layerRef = v2Bespoke(id, FRAG, {
+    scale: 0.5,
+    mat: { bg0:'#000000', acc:'#ffb070' },
+    spin: ['radial-gradient(circle at 50% 50%, #000 52%, #160800 74%, #3a1506 100%)', '#ffdcb8'],
+    frame: (gl, U, t, dt, st)=>{
+      lastT = t;
+      if(born === null) born = t;
+      const life = t - born;
+      const intro = reduce ? 1 : Math.min(1, life / 5.5);
+      const phiC = 0.6 + t * OMEGA;
+      const k = outCubic(life / 5.5);
+      const R = R0 + (55 - R0) * (1 - k), hgt = 1.5 + 0.35 * Math.sin(t * 0.07) + 14 * (1 - k);
+      const ro = [R * Math.cos(phiC), hgt, R * Math.sin(phiC)];
+      const T = [-Math.sin(phiC), 0, Math.cos(phiC)], In = [-Math.cos(phiC), 0, -Math.sin(phiC)];
+      const active = st && performance.now() - st.moved < 6000;
+      look.x = ease(look.x, active ? (st.x / W() - 0.5) : 0.08 * Math.sin(t * 0.05), 0.3, dt);
+      look.y = ease(look.y, active ? (0.5 - st.y / H()) : 0.04 * Math.sin(t * 0.04), 0.3, dt);
+      const b = 0.2 - look.x * 0.9;
+      const toHole = norm([-ro[0], -ro[1], -ro[2]]);
+      const cruise = norm([In[0] * Math.cos(b) + T[0] * Math.sin(b), -0.1 + look.y * 0.55, In[2] * Math.cos(b) + T[2] * Math.sin(b)]);
+      const f = norm([0, 1, 2].map(j=> toHole[j] * (1 - k) + cruise[j] * k));
+      const rt = norm([f[2], 0, -f[0]]);
+      const up = [f[1] * rt[2] - f[2] * rt[1], f[2] * rt[0] - f[0] * rt[2], f[0] * rt[1] - f[1] * rt[0]];
+      cam.ro = ro; cam.fw = f; cam.rt = rt; cam.up = up;
+
+      // the pulse: breathing in, then the blast
+      const inh = (t >= pulse.inhaleAt && t < pulse.blastAt) ? smooth((t - pulse.inhaleAt) / 1.7) : 0;
+      if(pulse.blastAt > 0 && t >= pulse.blastAt && pulse.blastAt > pulse.inhaleAt && !pulse.blasted){ pulse.blasted = true; blast(t); }
+      if(t < pulse.blastAt) pulse.blasted = false;
+      throb = Math.max(0, throb - dt * 0.5);
+      shake = Math.max(0, shake - dt * 0.9);
+      flare = Math.max(0, flare - dt * 0.8);
+      const holdOn = !!(st && st.down && performance.now() - st.downAt > 350);
+      const target = ((holdOn ? 1.5 : 1) + throb + inh * 0.3) * (0.05 + 0.95 * smooth(life / 3.5));
+      mass = ease(mass, target, 0.25, dt);
+
+      // the free shards
+      free.forEach((fr, i)=>{
+        let p, heat = 0, size = fr.size;
+        const ph = phiC + fr.rel, rr = R0 + fr.dr;
+        const home = [rr * Math.cos(ph), fr.y + 0.2 * Math.sin(t * 0.3 + i), rr * Math.sin(ph)];
+        if(fr.inhale){
+          const s = Math.min(1, (t - fr.inhale.at) / 1.7), e = s * s * s;
+          const from = fr.inhale.from;
+          const r0 = Math.hypot(from[0], from[2]), a0 = Math.atan2(from[2], from[0]) + e * (1.2 + fr.inhale.spiral);
+          const r1 = r0 * (1 - e * 0.97);
+          p = [r1 * Math.cos(a0), from[1] * (1 - e), r1 * Math.sin(a0)];
+          heat = e * 1.5; size = fr.size * (1 - e * 0.7);
+          if(e > 0.9) size = 0;
+          for(let j = 0; j < 3; j++) fr.rot[j] += dt * fr.spin[j] * (1 + e * 12);
+        } else if(fr.ej){
+          const tau = t - fr.ej.at;
+          const dist = 2.2 + fr.ej.v * (1 - Math.exp(-tau * 0.9)) / 0.9;
+          const out = [fr.ej.d[0] * dist, fr.ej.d[1] * dist, fr.ej.d[2] * dist];
+          const back = smooth((tau - 3.5) / 5);
+          p = [0, 1, 2].map(j=> out[j] * (1 - back) + home[j] * back);
+          heat = Math.max(0, 1.6 * Math.exp(-tau * 0.55)) * (1 - back);
+          size = fr.size * Math.min(1, 0.4 + tau * 1.5);
+          for(let j = 0; j < 3; j++) fr.rot[j] += dt * (fr.ej.spin[j] * Math.exp(-tau * 0.4) + fr.spin[j]);
+          if(back >= 1) fr.ej = null;
+        } else {
+          p = home;
+          for(let j = 0; j < 3; j++) fr.rot[j] += dt * fr.spin[j];
+        }
+        // keep them out of your face: never closer than a few units to the camera
+        const dc = [p[0] - ro[0], p[1] - ro[1], p[2] - ro[2]], dl = Math.hypot(dc[0], dc[1], dc[2]);
+        const minD = fr.ej ? 1.2 + size * 3 : 3.0;
+        if(dl < minD && dl > 1e-3) p = [ro[0] + dc[0] / dl * minD, ro[1] + dc[1] / dl * minD, ro[2] + dc[2] / dl * minD];
+        fr.pos = p; fr.heat = heat;
+        freeA.set([p[0], p[1], p[2], Math.max(0, size)], i * 4);
+        freeR.set([fr.rot[0], fr.rot[1], fr.rot[2], heat], i * 4);
+      });
+
+      const ox = 0.08 * Math.cos(t * 0.05), oy = 0.05 * Math.sin(t * 0.07);
+      const gal = norm([toHole[0] + rt[0] * ox + up[0] * oy, toHole[1] + rt[1] * ox + up[1] * oy, toHole[2] + rt[2] * ox + up[2] * oy]);
+      placeUi(t, life);
+      gl.uniform3f(U('u_ro'), ro[0], ro[1], ro[2]);
+      gl.uniform3f(U('u_fw'), f[0], f[1], f[2]);
+      gl.uniform3f(U('u_rt'), rt[0], rt[1], rt[2]);
+      gl.uniform3f(U('u_up'), up[0], up[1], up[2]);
+      gl.uniform3f(U('u_gal'), gal[0], gal[1], gal[2]);
+      gl.uniform2f(U('u_hole'), hole.ok ? (hole.x - W() / 2) / H() : 0, hole.ok ? (H() / 2 - hole.y) / H() : 0);
+      gl.uniform1f(U('u_mass'), mass);
+      gl.uniform1f(U('u_flare'), flare);
+      gl.uniform1f(U('u_knot'), knotAt);
+      gl.uniform1f(U('u_intro'), intro);
+      gl.uniform1f(U('u_inhale'), inh);
+      gl.uniform2f(U('u_shock'), shock.t, shock.k);
+      gl.uniform1f(U('u_shake'), reduce ? 0 : shake);
+      gl.uniform3f(U('u_wave'), wave.x, wave.y, wave.t);
+      gl.uniform4fv(U('u_free[0]'), freeA);
+      gl.uniform4fv(U('u_freeR[0]'), freeR);
+      renderChip(t);
+    },
+    // a short click on empty space is one beat of the pulse; a long press feeds the hole mass
+    up: (e, s, held)=>{
+      if(held > 350 || lastT - (born || 0) < 5) return;
+      firePulse(lastT);
+    },
+    teardown: ()=>{
+      offSpin();
+      document.body.classList.remove('demo-super-ui');
+      items.forEach(it=>{
+        it.el.classList.remove('demo-orbiter');
+        it.el.style.transform = it.prev.transform; it.el.style.opacity = it.prev.opacity;
+        it.el.style.zIndex = it.prev.zIndex; it.el.style.transition = it.prev.transition;
+        it.el.style.pointerEvents = it.prev.pointerEvents;
+      });
+    }
+  });
+};
+
+// ------------------------------------------------------------
+// ОСОБЕННЫЙ · Снежный шар [ДЕМО : ЗИМА 2027] — a snow globe on a table in a
+// warm dark room, fairy lights blurred behind. Inside the glass: a little
+// house with a lit window, two firs and a snowy hill, seen through the
+// lens of the sphere. The glass catches the room and a highlight that
+// follows the cursor. A click shakes it (the snow swirls up and settles
+// for a long while); every spin gives it a little nudge.
+// ------------------------------------------------------------
+DEMO_APPLY.demo_special = function(id){
+  const FRAG = SHADER_PRECISION + SHADER_NOISE + FBM_GLSL + `
+    uniform vec2 u_res; uniform float u_time; uniform vec2 u_ptr; uniform float u_ptrOn; uniform float u_shake; uniform float u_swirl;
+    float ASP;
+    ${DEMO_GRADE}
+    ${r2GLSL}
+    float box(vec2 p, vec2 b){ vec2 d = abs(p) - b; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); }
+    float tri(vec2 p, float w, float h){ return max(abs(p.x) * h / w + p.y - h, -p.y); }
+    vec3 room(vec2 p, vec2 uv){
+      vec3 c = mix(vec3(0.13, 0.075, 0.055), vec3(0.05, 0.03, 0.03), smoothstep(0.2, 1.0, uv.y));
+      // fairy lights hanging across the wall, out of focus
+      for(int i = 0; i < 14; i++){
+        float fi = float(i);
+        float x = (fi + 0.5) / 14.0 * ASP;
+        float k = (x - 0.5 * ASP) / (0.55 * ASP);
+        vec2 lp = vec2(x, 0.9 - 0.13 * (1.0 - k * k));
+        float d = length(p - lp);
+        float h = hash(vec2(fi, 3.0));
+        vec3 lc = h < 0.5 ? vec3(1.0, 0.72, 0.35) : (h < 0.75 ? vec3(1.0, 0.45, 0.3) : vec3(0.6, 0.9, 0.6));
+        float tw = 0.75 + 0.25 * sin(u_time * (0.8 + h) + fi);
+        c += lc * (smoothstep(0.045, 0.03, d) * 0.22 + exp(-d * 14.0) * 0.12) * tw;
+      }
+      return c;
+    }
+    float gAt(float x){ return -0.38 + 0.07 * sin(x * 2.4 + 0.8) + 0.025 * sin(x * 7.0); }
+    vec3 inside(vec2 s, float t){
+      vec3 c = mix(vec3(0.12, 0.17, 0.36), vec3(0.03, 0.05, 0.16), s.y * 0.5 + 0.5);
+      vec2 sg = s * 40.0; vec2 sid = floor(sg);
+      if(hash(sid) > 0.96) c += vec3(0.8, 0.85, 1.0) * smoothstep(0.2, 0.0, length(fract(sg) - 0.5)) * 0.6;
+      float g = gAt(s.x);
+      // house with a lit window
+      // the house sits left of centre so the spin key never hides it
+      vec2 hp = s - vec2(-0.4, gAt(-0.4) + 0.1);
+      float body = box(hp, vec2(0.17, 0.11));
+      float roof = tri(hp - vec2(0.0, 0.1), 0.24, 0.16);
+      float chim = box(hp - vec2(0.1, 0.22), vec2(0.025, 0.05));
+      vec2 wp = hp - vec2(-0.06, 0.0);
+      float win = box(wp, vec2(0.045, 0.04));
+      float door = box(hp - vec2(0.08, -0.04), vec2(0.035, 0.07));
+      vec3 wood = vec3(0.42, 0.2, 0.1) * (0.8 + 0.2 * noise(hp * vec2(8.0, 60.0)));
+      // warm light from the window onto the snow
+      c += vec3(1.0, 0.6, 0.25) * exp(-length(s - vec2(-0.46, gAt(-0.46))) * 4.0) * 0.14;
+      c = mix(c, vec3(0.3, 0.12, 0.08), smoothstep(0.006, -0.006, chim));
+      c = mix(c, wood, smoothstep(0.006, -0.006, body));
+      c = mix(c, vec3(1.0, 0.76, 0.38) * (0.9 + 0.1 * sin(t * 3.0)), smoothstep(0.005, -0.005, win));
+      c = mix(c, wood * 0.5, smoothstep(0.004, 0.0, abs(wp.x)) * smoothstep(0.005, -0.005, win));
+      c = mix(c, vec3(0.25, 0.1, 0.05), smoothstep(0.005, -0.005, door));
+      c = mix(c, mix(vec3(0.85, 0.9, 1.0), vec3(0.6, 0.68, 0.9), smoothstep(0.1, -0.05, hp.y - 0.12)), smoothstep(0.006, -0.006, roof));
+      // two firs, snow on their tiers
+      for(int k = 0; k < 2; k++){
+        vec2 tp = s - (k == 0 ? vec2(-0.74, gAt(-0.74) - 0.02) : vec2(0.66, gAt(0.66) - 0.03));
+        float sc = k == 0 ? 1.0 : 0.8;
+        float tr = 9.0;
+        for(int j = 0; j < 3; j++){
+          float fj = float(j);
+          tr = min(tr, tri((tp - vec2(0.0, (0.06 + fj * 0.1) * sc)) / sc, 0.15 - fj * 0.035, 0.16) * sc);
+        }
+        float trunk = box(tp - vec2(0.0, 0.03 * sc), vec2(0.018, 0.04) * sc);
+        c = mix(c, vec3(0.2, 0.1, 0.05), smoothstep(0.004, -0.004, trunk));
+        vec3 fir = mix(vec3(0.03, 0.18, 0.12), vec3(0.85, 0.9, 1.0), smoothstep(0.55, 0.75, noise(tp * 40.0)) * 0.8);
+        c = mix(c, fir, smoothstep(0.005, -0.005, tr));
+      }
+      // snowy hill
+      float gm = smoothstep(g + 0.006, g - 0.006, s.y);
+      vec3 snow = mix(vec3(0.62, 0.7, 0.92), vec3(0.95, 0.97, 1.0), smoothstep(g - 0.35, g, s.y));
+      c = mix(c, snow, gm);
+      // a snowman on the right, with a carrot nose and a red scarf
+      vec2 sm = s - vec2(0.38, gAt(0.38) - 0.03);
+      float b1 = length(sm - vec2(0.0, 0.07)) - 0.075;
+      float b2 = length(sm - vec2(0.0, 0.18)) - 0.055;
+      float b3 = length(sm - vec2(0.0, 0.265)) - 0.04;
+      float man = min(b1, min(b2, b3));
+      vec3 mc = mix(vec3(0.66, 0.74, 0.94), vec3(1.0), smoothstep(-0.06, 0.05, sm.x * -0.6 + sm.y * 0.2 - 0.02));
+      c = mix(c, mc, smoothstep(0.005, -0.005, man));
+      c = mix(c, vec3(0.8, 0.12, 0.12), smoothstep(0.005, -0.005, box(sm - vec2(0.0, 0.225), vec2(0.05, 0.012))) * smoothstep(0.01, -0.01, b2 - 0.012));
+      c = mix(c, vec3(1.0, 0.5, 0.1), smoothstep(0.004, -0.004, tri(r2(sm - vec2(-0.035, 0.265), 1.57), 0.01, 0.04)));
+      vec2 ey = vec2(abs(sm.x + 0.012) - 0.014, sm.y - 0.28);
+      c = mix(c, vec3(0.05), smoothstep(0.007, 0.004, length(ey)));
+      // the snow: three depths, swirling while it is shaken
+      for(int L = 0; L < 3; L++){
+        float fl = float(L);
+        float S = 9.0 + fl * 7.0;
+        vec2 q = r2(s, u_swirl * (1.3 - length(s)) * (0.6 + fl * 0.2));
+        vec2 gg = q * S + vec2(0.0, t * (0.35 + fl * 0.12) * (1.0 - u_shake * 0.9));
+        gg.x += sin(gg.y * 0.7 + fl * 3.0 + t * 0.4) * 0.3;
+        vec2 id = floor(gg); vec2 f = fract(gg) - 0.5;
+        float h = hash(id + fl * 21.0);
+        if(h > 0.78 - u_shake * 0.35){
+          vec2 o = (vec2(hash(id + 1.0), hash(id + 2.0)) - 0.5) * 0.6;
+          float r = (0.05 + 0.06 * hash(id + 3.0)) * (1.0 + (2.0 - fl) * 0.25);
+          float blur = fl < 0.5 ? 0.06 : 0.02;
+          c = mix(c, vec3(1.0), smoothstep(r + blur, r - blur, length(f - o)) * (0.9 - fl * 0.15));
+        }
+      }
+      return c;
+    }
+    void main(){
+      vec2 uv = gl_FragCoord.xy / u_res;
+      ASP = u_res.x / u_res.y;
+      vec2 p = vec2(uv.x * ASP, uv.y);
+      float t = u_time;
+      float R = min(0.27, 0.36 * ASP);
+      vec2 C = vec2(0.5 * ASP + 0.012 * sin(t * 28.0) * u_shake * u_shake, 0.56);
+      float tableY = 0.2;    // where the base stands
+      float edgeY = 0.34;    // the far edge of the table, against the wall
+      float topY = C.y - R * 0.86 - tableY;
+      vec3 col = room(p, uv);
+      // the wall darkens where it meets the table
+      col *= 1.0 - 0.45 * exp(-max(uv.y - edgeY, 0.0) * 26.0);
+      if(uv.y < edgeY + 0.002){
+        // a lacquered walnut top seen in perspective: the planks run away from you
+        float dz = clamp((edgeY - uv.y) / edgeY, 0.0, 1.0);
+        float persp = 0.55 + dz * 0.9;
+        float u = (p.x - 0.5 * ASP) / persp;
+        float v = 1.0 / (dz + 0.07);
+        float pu = u * 2.4 + 0.5;
+        float plank = floor(pu), pf = fract(pu);
+        float grain = noise(vec2(u * 16.0 + plank * 7.1, v * 0.9 + plank * 3.3)) * 0.55 + noise(vec2(u * 70.0 + plank * 2.0, v * 0.3)) * 0.45;
+        float figure = smoothstep(0.3, 0.7, noise(vec2(u * 5.0 + plank * 2.3, v * 0.25 + sin(u * 9.0) * 0.4)));
+        vec3 wood = mix(vec3(0.12, 0.05, 0.026), vec3(0.32, 0.15, 0.07), grain);
+        wood = mix(wood, wood * 0.7, figure * 0.55);
+        wood *= 1.0 - 0.6 * smoothstep(0.035, 0.0, min(pf, 1.0 - pf)) * (0.25 + 0.75 * dz);
+        // lacquer: the wall and its fairy lights mirrored in it, strongest at grazing angles
+        float fres = 0.1 + 0.55 * pow(1.0 - dz, 3.0);
+        vec2 mp = vec2(p.x, edgeY + (edgeY - uv.y) * 2.6);
+        vec3 refl = room(mp, vec2(uv.x, mp.y));
+        // the base standing on it, mirrored below itself
+        vec2 mb = vec2(p.x - C.x, 2.0 * tableY - uv.y - tableY);
+        float mhw = mix(R * 0.95, R * 0.72, clamp(mb.y / topY, 0.0, 1.0));
+        float mbase = max(abs(mb.x) - mhw, max(-mb.y, mb.y - topY));
+        vec3 mbc = mix(vec3(0.2, 0.08, 0.045), vec3(0.4, 0.19, 0.09), smoothstep(-mhw, mhw * 0.4, mb.x));
+        mbc = mix(mbc, vec3(0.85, 0.62, 0.25), smoothstep(0.012, 0.0, abs(mb.y - topY * 0.7) - 0.01));
+        refl = mix(refl, mbc, smoothstep(0.01, -0.01, mbase) * (0.9 - 0.5 * smoothstep(0.0, topY, mb.y)));
+        wood = mix(wood, wood + refl * 0.9, fres);
+        // light from the globe pooling on the wood, cold in the middle, and a soft contact shadow
+        vec2 sp = (p - vec2(C.x, tableY)) * vec2(1.0, 3.2);
+        wood += vec3(0.45, 0.65, 1.0) * exp(-dot(sp, sp) * 5.0) * 0.07;
+        wood += vec3(1.0, 0.6, 0.3) * exp(-dot(sp - vec2(-0.25, 0.0), sp - vec2(-0.25, 0.0)) * 6.0) * 0.04;
+        vec2 cs = (p - vec2(C.x, tableY - 0.004)) / vec2(R * 1.05, 0.03);
+        wood *= 1.0 - 0.55 * exp(-dot(cs, cs) * 1.6);
+        // the front edge: a rounded bevel catching the light, then the dark edge face
+        float fe = 0.03;
+        wood = mix(wood, vec3(0.55, 0.32, 0.18), smoothstep(0.006, 0.0, abs(uv.y - fe)) * 0.6);
+        wood = mix(wood, vec3(0.07, 0.03, 0.02) * (0.8 + 0.4 * grain), smoothstep(fe, fe - 0.004, uv.y));
+        col = mix(col, wood, smoothstep(edgeY + 0.002, edgeY - 0.002, uv.y));
+      }
+      // the wooden base with a brass band
+      vec2 bp = p - vec2(C.x, tableY);
+      float hw = mix(R * 0.95, R * 0.72, clamp(bp.y / topY, 0.0, 1.0));
+      float base = max(abs(bp.x) - hw, max(-bp.y, bp.y - topY));
+      vec3 bc = mix(vec3(0.22, 0.09, 0.05), vec3(0.42, 0.2, 0.1), smoothstep(-hw, hw * 0.4, bp.x));
+      bc *= 0.85 + 0.15 * noise(vec2(bp.x * 40.0, bp.y * 400.0));
+      // a brass band: dark at the edges, a bright specular line where it faces the light
+      float bandY = abs(bp.y - topY * 0.7);
+      vec3 brass = mix(vec3(0.35, 0.22, 0.08), vec3(0.78, 0.58, 0.26), smoothstep(-hw, hw * 0.3, bp.x));
+      brass += vec3(1.0, 0.85, 0.55) * smoothstep(0.003, 0.0, abs(bp.y - topY * 0.7 - 0.002)) * smoothstep(-hw, 0.0, bp.x) * 0.5;
+      bc = mix(bc, brass, smoothstep(0.009, 0.006, bandY));
+      bc += vec3(0.5, 0.7, 1.0) * smoothstep(topY - 0.02, topY, bp.y) * 0.12;
+      col = mix(col, bc, smoothstep(0.003, -0.003, base));
+      // the globe
+      vec2 q = (p - C) / R;
+      float d = length(q);
+      float px = 1.5 / (u_res.y * R);
+      if(d < 1.0 + px){
+        float nz = sqrt(max(0.0, 1.0 - d * d));
+        vec3 n = vec3(q, nz);
+        vec2 s = q * mix(0.78, 1.0, 1.0 - nz);
+        vec3 g = inside(s, t);
+        g = mix(g, g * vec3(0.85, 0.92, 1.0), 0.3);
+        vec2 cp = (vec2(u_ptr.x * ASP, u_ptr.y) - C) / R;
+        vec3 Ld = normalize(vec3(mix(vec2(-0.55, 0.6), clamp(cp * 0.6, -1.2, 1.2), u_ptrOn), 1.0));
+        float spec = pow(max(dot(reflect(-Ld, n), vec3(0.0, 0.0, 1.0)), 0.0), 90.0);
+        float fre = pow(1.0 - nz, 3.0);
+        vec2 wq = n.xy - vec2(-0.48, 0.46);
+        float window = smoothstep(0.06, -0.04, box(wq, vec2(0.15, 0.11))) * (1.0 - smoothstep(0.02, 0.0, min(abs(wq.x), abs(wq.y))) * 0.5) * 0.6;
+        g += vec3(1.0, 0.78, 0.55) * fre * 0.45;
+        g += vec3(0.95, 0.9, 0.85) * window * 0.12;
+        g += vec3(1.0) * spec * 0.9;
+        g *= 1.0 - smoothstep(0.93, 1.0, d) * 0.3;
+        col = mix(col, g, smoothstep(1.0 + px, 1.0 - px, d));
+      }
+      gl_FragColor = vec4(demoGrade(col, uv, 0.75), 1.0);
+    }
+  `;
+  let ptrOn = 0, shake = 0, swirl = 0;
+  const offSpin = demoOnSpin(()=>{ shake = Math.max(shake, 0.35); });
+  v2Bespoke(id, FRAG, {
+    scale: 0.55,
+    mat: { bg0:'#140c0a', acc:'#9fd8ff' },
+    spin: ['linear-gradient(180deg,#d8f2ff,#8fd0ff 55%,#4a90d0)', '#0a1a2a'],
+    frame: (gl, U, t, dt, st)=>{
+      ptrOn = ease(ptrOn, (st && performance.now() - st.moved < 3000) ? 1 : 0, 0.15, dt);
+      shake = Math.max(0, shake - dt * 0.12);
+      swirl += shake * shake * dt * 5;
+      gl.uniform2f(U('u_ptr'), st ? st.x / window.innerWidth : 0.5, st ? 1 - st.y / window.innerHeight : 0.5);
+      gl.uniform1f(U('u_ptrOn'), ptrOn);
+      gl.uniform1f(U('u_shake'), shake);
+      gl.uniform1f(U('u_swirl'), swirl);
+    },
+    down: ()=>{ shake = 1; },
+    teardown: offSpin
   });
 };
 
@@ -11587,10 +16421,11 @@ function applyThemeForItem(id){
     pollen: { bg:'linear-gradient(180deg,#6a5418,#8a6a1e,#a8862c)', panel:'#5a4614', accent:'#ffd76a', text:'#fff4d0', vignette:0.2, emojis: [] },
     hypnosis: { bg:'radial-gradient(circle at 50% 50%,#3a1060,#1e0836 65%,#0c0318 100%)', panel:'#2a0c48', accent:'#c77fff', text:'#eeddff', vignette:0.35, emojis: [] },
     simple: { bg:'#f0f0f0', panel:'#ffffff', accent:'#888888', text:'#000000', vignette:0, emojis: [] },
+    glokus_king: { bg:'linear-gradient(180deg,#3a0610,#2a050b)', panel:'#3a0610', accent:'#f2c75c', text:'#fff3d6', vignette:0.2, emojis: [] },
     summer_cocktail: { bg:'linear-gradient(180deg,#1a0a38,#4a1a6e,#c0288a,#ff8f3c,#ffd23f)', panel:'#2a0838', accent:'#ff5fa8', text:'#fff0e0', vignette:0.2, emojis: [] }
   };
   const meta = ITEMS[id] || {};
-  const p = palette[id] || palette.common;
+  const p = DEMO_THEMES[id] || palette[id] || palette.common;
 
   // Button theme helper: preserve originals on first change, then swap texts/colors based on theme.
   (function(){
@@ -12468,6 +17303,22 @@ function applyThemeForItem(id){
           'Оставить':'Вставить в Оправу',
           'Открыть':'Просветить',
           'Выдать':'Преломить'
+        });
+      } else if(theme === 'glokus_king'){
+        setButtonColors('linear-gradient(180deg,#b51d33,#5a0a16)', '#ffe39a', '#7a0f1e', '#ffe9b0', '#b8862e', '#3a0610');
+        applyButtonLabelMap({
+          'Прокрутить':'Вершить',
+          'Авто‑Прокрутка':'Авто‑Указ',
+          'Авто‑Прокрутка (1111🪙)':'Авто: Указ (1111🪙)',
+          'Авто‑Прокрутка: Вкл':'Указ: Вкл',
+          'Авто‑Прокрутка: Выкл':'Указ: Выкл',
+          'Инвентарь':'Казна',
+          'Кузница':'Мастерская',
+          'Расширить инвентарь':'Расширить Казну',
+          'Пропустить':'Помиловать',
+          'Оставить':'Принять ко двору',
+          'Открыть':'Огласить',
+          'Выдать':'Пожаловать'
         });
       } else if(theme === 'pollen'){
         setButtonColors('linear-gradient(180deg,#ffd76a,#c8a02c)', '#2a2008', '#a8862c', '#fff4d0', '#ffd76a', '#5a4614');
@@ -16356,6 +21207,13 @@ function renderInventory(){
       recomputeEquipmentEffects();
     });
 
+    // Кристаллическая Перчатка (Левая Рука)
+    if(typeof window.crystalGloveActive === 'undefined') window.crystalGloveActive = false;
+    addEquipmentRow('crystal_glove', 'Кристаллическая Перчатка (Левая Рука)', ()=>window.crystalGloveActive, ()=>{
+      window.crystalGloveActive = !window.crystalGloveActive;
+      recomputeEquipmentEffects();
+    });
+
     // Автособиратель
     if(typeof window.autoCollectorActive === 'undefined') window.autoCollectorActive = false;
     addEquipmentRow('auto_collector', 'Автособиратель', ()=>window.autoCollectorActive, ()=>{
@@ -16368,7 +21226,7 @@ function renderInventory(){
       const meta = ITEMS[k];
       if(!meta) return;
       // skip ones we've already added explicitly (avoid duplicates like auto_collector)
-      if(['skipper','pig_glove','rich_glove','friends_glove','ghost_glove','lucky_glove','zombie_glove','auto_collector','volcanic_glove','lightning_glove','rainbow_glove','clover_glove'].includes(k)) return;
+      if(['skipper','pig_glove','rich_glove','friends_glove','ghost_glove','lucky_glove','zombie_glove','auto_collector','volcanic_glove','lightning_glove','rainbow_glove','clover_glove','crystal_glove'].includes(k)) return;
       // one-time-use keys get their own "Использовать" row below, not a toggle
       if(meta.isKey) return;
       // treat as equipment if rarity === '-' (and not an explicit 'hand' handled above)
@@ -17178,6 +22036,277 @@ let questState = {}; // persisted quest-line progress — declared here (not low
 // quest system's other code lives) so it's already initialized by the time loadStateFromSlot
 // runs; that call happens synchronously much earlier in the file than the quest code itself.
 
+// ---- Things promo codes create that must outlive a reload ----
+// A custom promo buff is a synthetic POTIONS entry; its definition is saved here so the entry
+// can be rebuilt on load before its active timer / spin charges are restored.
+let promoCustomDefs = {}; // buffId -> the code's custom buff definition
+function definePromoCustomPotion(buffId, c){
+  promoCustomDefs[buffId] = c;
+  POTIONS[buffId] = {
+    id: buffId,
+    name: c.name || 'Кастомный бафф',
+    effectName: c.name || 'Кастомный бафф',
+    desc: c.desc || '',
+    color: c.color || '#ffb84d',
+    iconColor: c.color || '#ffb84d',
+    count: (POTIONS[buffId] && POTIONS[buffId].count) || 0,
+    duration: c.spinCount ? 0 : (c.durationMs || 60000),
+    bonus: c.luckPercent || 0,
+    speedBonus: c.speedPercent || 0,
+    luckMultiplier: c.luckMultiplier || undefined,
+    speedMultiplier: c.speedMultiplier || undefined,
+    fixedLuck: c.fixedLuck || undefined,
+    fixedSpeed: c.fixedSpeed || undefined,
+    oneShot: !!c.spinCount,
+    _promoCustomOwner: true
+  };
+}
+// A custom quest from a promo code becomes its own one-quest line in QUEST_LINES. The
+// definitions are saved with the game and merged in once the quest system exists.
+let customQuests = {}; // lineId -> { name, description, quests:[...], expiresAt, custom:true }
+function syncCustomQuestLines(){
+  if(!window._questLinesReady) return;
+  Object.keys(QUEST_LINES).forEach(k=>{ if(QUEST_LINES[k].custom && !customQuests[k]) delete QUEST_LINES[k]; });
+  Object.keys(customQuests).forEach(k=>{ QUEST_LINES[k] = customQuests[k]; });
+}
+// a custom quest with a time limit stops counting and can't be completed once it runs out
+function questLineLive(line){ return !(line && line.expiresAt && Date.now() > line.expiresAt); }
+// custom quest text comes from whoever made the code: never let it become markup
+function escapeQuestText(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])); }
+function fmtQuestLeft(ms){
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if(d > 0) return `${d} д ${h} ч`;
+  if(h > 0) return `${h} ч ${m} мин`;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+function customQuestStatusHtml(line, st){
+  if(st.questIndex >= line.quests.length) return '<div class="quest-line-timer qlt-done">Выполнен ✓</div>';
+  if(!questLineLive(line)) return '<div class="quest-line-timer qlt-out">Время вышло</div>';
+  if(line.expiresAt) return `<div class="quest-line-timer">⏳ Осталось: <span data-cq-exp="${line.expiresAt}">${fmtQuestLeft(line.expiresAt - Date.now())}</span></div>`;
+  return '<div class="quest-line-timer qlt-free">Без ограничения по времени</div>';
+}
+// ---- Quest task types: everything a quest (built-in or from a code) can ask for ----
+// kind 'event' counts things that happen (and can carry conditions: weather / time of day /
+// theme / auto-spin), 'time' counts seconds while something is true, 'state' watches a value
+// and keeps the best it has reached. params: which extra field the task needs.
+const qtPl = (n, one, few, many)=>{ n = Math.floor(n); const a = n % 100, b = n % 10; return (a > 10 && a < 20) ? many : b === 1 ? one : (b > 1 && b < 5) ? few : many; };
+const qtNum = (n)=> Math.floor(n).toLocaleString('ru-RU');
+const qtAura = (id)=> `«${(ITEMS[id] || {}).name || id}»`;
+const qtPot = (id)=> `«${(POTIONS[id] || {}).name || id}»`;
+const QUEST_TASK_TYPES = {
+  spins:            { group:'Прокрутки', name:'Сделать прокрутки', kind:'event', label:(t, n)=> `Сделай ${qtNum(n)} ${qtPl(n, 'прокрутку', 'прокрутки', 'прокруток')}` },
+  autoSpins:        { group:'Прокрутки', name:'Прокрутки на авто‑прокрутке', kind:'event', label:(t, n)=> `Сделай ${qtNum(n)} ${qtPl(n, 'прокрутку', 'прокрутки', 'прокруток')} на авто‑прокрутке` },
+  totalSpins:       { group:'Прокрутки', name:'Набрать прокруток всего', kind:'state', label:(t, n)=> `Набери ${qtNum(n)} прокруток за всё время` },
+  rarityClass:      { group:'Ауры', name:'Выбить ауры класса', kind:'event', params:['class'], label:(t, n)=> `Выбей ${qtNum(n)} ${qtPl(n, 'ауру', 'ауры', 'аур')} класса «${(RARITY_CLASS_META[t.rarityClass] || {}).name || t.rarityClass}»` },
+  specificAura:     { group:'Ауры', name:'Выбить конкретную ауру', kind:'event', params:['aura'], label:(t, n)=> `Выбей ${qtAura(t.auraId)}${n > 1 ? ' x' + qtNum(n) : ''}` },
+  rarer:            { group:'Ауры', name:'Выбить ауры не чаще 1 к N', kind:'event', params:['denom'], label:(t, n)=> `Выбей ${qtNum(n)} ${qtPl(n, 'ауру', 'ауры', 'аур')} редкостью от 1 к ${qtNum(t.minDenom)}` },
+  keep:             { group:'Ауры', name:'Оставить ауры', kind:'event', params:['classAny'], label:(t, n)=> `Оставь ${qtNum(n)} ${qtPl(n, 'ауру', 'ауры', 'аур')}${t.rarityClass ? ` класса «${RARITY_CLASS_META[t.rarityClass].name}»` : ''}` },
+  skip:             { group:'Ауры', name:'Пропустить ауры', kind:'event', params:['classAny'], label:(t, n)=> `Пропусти ${qtNum(n)} ${qtPl(n, 'ауру', 'ауры', 'аур')}${t.rarityClass ? ` класса «${RARITY_CLASS_META[t.rarityClass].name}»` : ''}` },
+  uniqueAuras:      { group:'Ауры', name:'Открыть разные ауры', kind:'state', label:(t, n)=> `Открой ${qtNum(n)} разных ${qtPl(n, 'ауру', 'ауры', 'аур')}` },
+  ownAura:          { group:'Ауры', name:'Собрать ауру в инвентаре', kind:'state', params:['aura'], label:(t, n)=> `Собери ${qtAura(t.auraId)} x${qtNum(n)} в инвентаре` },
+  potionUse:        { group:'Зелья', name:'Использовать любые зелья', kind:'event', label:(t, n)=> `Используй ${qtNum(n)} ${qtPl(n, 'зелье', 'зелья', 'зелий')}` },
+  specificPotionUse:{ group:'Зелья', name:'Использовать конкретное зелье', kind:'event', params:['potion'], label:(t, n)=> `Используй ${qtPot(t.potionId)} x${qtNum(n)}` },
+  ownPotion:        { group:'Зелья', name:'Накопить зелье', kind:'state', params:['potion'], label:(t, n)=> `Накопи ${qtPot(t.potionId)} x${qtNum(n)}` },
+  craft:            { group:'Зелья', name:'Скрафтить предметы', kind:'event', label:(t, n)=> `Скрафти ${qtNum(n)} ${qtPl(n, 'предмет', 'предмета', 'предметов')} в кузнице или зельеварне` },
+  playMinutes:      { group:'Время и погода', name:'Поиграть N минут', kind:'time', label:(t, n)=> `Поиграй ${qtNum(n)} ${qtPl(n, 'минуту', 'минуты', 'минут')}` },
+  weatherMinutes:   { group:'Время и погода', name:'Поиграть в погоде', kind:'time', params:['weather'], label:(t, n)=> `Поиграй ${qtNum(n)} ${qtPl(n, 'минуту', 'минуты', 'минут')} в погоде «${t.weatherName}»` },
+  timeMinutes:      { group:'Время и погода', name:'Поиграть днём / ночью', kind:'time', params:['time'], label:(t, n)=> `Поиграй ${qtNum(n)} ${qtPl(n, 'минуту', 'минуты', 'минут')} ${t.timeOfDay === 'Ночь' ? 'ночью' : 'днём'}` },
+  themeMinutes:     { group:'Время и погода', name:'Поиграть с темой ауры', kind:'time', params:['aura'], label:(t, n)=> `Поиграй ${qtNum(n)} ${qtPl(n, 'минуту', 'минуты', 'минут')} с темой ${qtAura(t.auraId)}` },
+  autoSpinMinutes:  { group:'Время и погода', name:'Держать авто‑прокрутку', kind:'time', label:(t, n)=> `Держи авто‑прокрутку включённой ${qtNum(n)} ${qtPl(n, 'минуту', 'минуты', 'минут')}` },
+  weatherSeen:      { group:'Время и погода', name:'Застать погоду', kind:'event', params:['weather'], label:(t, n)=> `Застань погоду «${t.weatherName}»${n > 1 ? ' ' + qtNum(n) + ' ' + qtPl(n, 'раз', 'раза', 'раз') : ''}` },
+  biomeChangerWeather:{ group:'Время и погода', name:'Выбить погоду изменителем биома', kind:'event', params:['weather'], label:(t, n)=> `Выбей «${t.weatherName}» изменителем биома${n > 1 ? ' x' + qtNum(n) : ''}` },
+  earnCoins:        { group:'Монеты', name:'Заработать монеты', kind:'event', label:(t, n)=> `Заработай ${qtNum(n)} ${qtPl(n, 'монету', 'монеты', 'монет')}` },
+  haveCoins:        { group:'Монеты', name:'Накопить монеты', kind:'state', label:(t, n)=> `Накопи ${qtNum(n)} ${qtPl(n, 'монету', 'монеты', 'монет')}` },
+  coinPick:         { group:'Монеты', name:'Собрать монетки на экране', kind:'event', label:(t, n)=> `Собери ${qtNum(n)} ${qtPl(n, 'монетку', 'монетки', 'монеток')} на экране` },
+  bankWithdraw:     { group:'Монеты', name:'Вывести монеты из банка', kind:'event', label:(t, n)=> `Выведи из банка ${qtNum(n)} ${qtPl(n, 'монету', 'монеты', 'монет')}` },
+  bankLevel:        { group:'Монеты', name:'Прокачать банк', kind:'state', label:(t, n)=> `Прокачай банк до уровня ${qtNum(n)}` },
+  luckReach:        { group:'Другое', name:'Достичь удачи', kind:'state', label:(t, n)=> `Достигни удачи ${qtNum(n)}%` },
+  wordle:           { group:'Другое', name:'Разгадать «Слова»', kind:'event', label:(t, n)=> `Разгадай ${qtNum(n)} ${qtPl(n, 'слово', 'слова', 'слов')} в «Словах»` },
+  questsDone:       { group:'Другое', name:'Выполнить другие квесты', kind:'event', label:(t, n)=> `Выполни ${qtNum(n)} ${qtPl(n, 'другой квест', 'других квеста', 'других квестов')}` }
+};
+// how a task is shown to the player; 'time' tasks keep seconds but are asked for in minutes
+function customTaskLabel(t){
+  const T = QUEST_TASK_TYPES[t.type];
+  if(!T) return t.label || 'Задание';
+  const n = T.kind === 'time' ? t.target / 60 : t.target;
+  let s = T.label(t, n);
+  const c = t.cond || {};
+  if(c.weather) s += ` в погоде «${c.weather}»`;
+  if(c.time) s += c.time === 'Ночь' ? ' ночью' : ' днём';
+  if(c.theme) s += ` с темой ${qtAura(c.theme)}`;
+  if(c.auto) s += ' на авто‑прокрутке';
+  return s;
+}
+function questProgressText(task, p){
+  const T = QUEST_TASK_TYPES[task.type];
+  if(T && T.kind === 'time') return `${qtNum(p / 60)} / ${qtNum(task.target / 60)} мин`;
+  if(task.type === 'luckReach') return `${qtNum(p)}% / ${qtNum(task.target)}%`;
+  return `${qtNum(p)} / ${qtNum(task.target)}`;
+}
+// conditions a code can put on any "event" task
+function questCondOk(t){
+  const c = t.cond;
+  if(!c) return true;
+  if(c.weather && currentWeather !== c.weather) return false;
+  if(c.time && gameTime !== c.time) return false;
+  if(c.theme && activeThemeId !== c.theme) return false;
+  if(c.auto && !autoSpinEnabled) return false;
+  return true;
+}
+// one place every quest line (built-in and custom) hears about what happened
+function questEvent(type, test, amount){
+  if(!window._questLinesReady) return false;
+  const add = amount === undefined ? 1 : amount;
+  if(!(add > 0)) return false;
+  let changed = false;
+  Object.keys(QUEST_LINES).forEach(lineId=>{
+    const line = QUEST_LINES[lineId];
+    const st = getQuestState(lineId);
+    const quest = line.quests[st.questIndex];
+    if(!quest || !questLineLive(line)) return;
+    quest.tasks.forEach((task, ti)=>{
+      if(task.type !== type || (test && !test(task)) || !questCondOk(task)) return;
+      if(!st.progress[st.questIndex]) st.progress[st.questIndex] = {};
+      const cur = st.progress[st.questIndex][ti] || 0;
+      if(cur >= task.target) return;
+      st.progress[st.questIndex][ti] = Math.min(task.target, cur + add);
+      changed = true;
+    });
+  });
+  return changed;
+}
+// 'state' tasks keep the best value reached
+function questSet(type, valueOf){
+  if(!window._questLinesReady) return false;
+  let changed = false;
+  Object.keys(QUEST_LINES).forEach(lineId=>{
+    const line = QUEST_LINES[lineId];
+    const st = getQuestState(lineId);
+    const quest = line.quests[st.questIndex];
+    if(!quest || !questLineLive(line)) return;
+    quest.tasks.forEach((task, ti)=>{
+      if(task.type !== type) return;
+      const v = Math.min(task.target, Number(valueOf(task)) || 0);
+      if(!st.progress[st.questIndex]) st.progress[st.questIndex] = {};
+      if(v > (st.progress[st.questIndex][ti] || 0)){ st.progress[st.questIndex][ti] = v; changed = true; }
+    });
+  });
+  return changed;
+}
+// an event that isn't followed by a save of its own: show it, save it soon
+let _questDirty = false;
+function questTouched(changed){
+  if(!changed) return;
+  _questDirty = true;
+  try{ renderQuestsUI(); }catch(e){}
+}
+// the clock: time spent in a weather / at night / with a theme, weather that arrives,
+// coins coming in, and the values 'state' tasks watch
+let _qtLast = Date.now(), _qtWeather = null, _qtCoins = null, _qtSavedAt = Date.now();
+setInterval(()=>{
+  if(!window._questLinesReady) return;
+  const now = Date.now();
+  const dt = Math.min(5, Math.max(0, (now - _qtLast) / 1000));
+  _qtLast = now;
+  let ch = false;
+  try{
+    ch = questEvent('playMinutes', null, dt) || ch;
+    ch = questEvent('weatherMinutes', t => t.weatherName === currentWeather, dt) || ch;
+    ch = questEvent('timeMinutes', t => t.timeOfDay === gameTime, dt) || ch;
+    ch = questEvent('themeMinutes', t => t.auraId === activeThemeId, dt) || ch;
+    if(autoSpinEnabled) ch = questEvent('autoSpinMinutes', null, dt) || ch;
+    if(_qtWeather !== null && _qtWeather !== currentWeather) ch = questEvent('weatherSeen', t => t.weatherName === currentWeather) || ch;
+    _qtWeather = currentWeather;
+    if(_qtCoins !== null && coins > _qtCoins) ch = questEvent('earnCoins', null, coins - _qtCoins) || ch;
+    _qtCoins = coins;
+    ch = questSet('haveCoins', ()=> coins) || ch;
+    ch = questSet('totalSpins', ()=> totalSpins) || ch;
+    ch = questSet('ownAura', t => (inventory[t.auraId] || {}).count || 0) || ch;
+    ch = questSet('ownPotion', t => (POTIONS[t.potionId] || {}).count || 0) || ch;
+    ch = questSet('uniqueAuras', ()=> Object.keys(window._seenItems || {}).length) || ch;
+    ch = questSet('luckReach', ()=> getCurrentLuckPercent()) || ch;
+    ch = questSet('bankLevel', ()=> bankLevel) || ch;
+  }catch(e){}
+  if(ch){ _questDirty = true; try{ updateQuestBarsInPlace(); }catch(e){} }
+  if(_questDirty && now - _qtSavedAt > 15000){ _questDirty = false; _qtSavedAt = now; try{ saveState(); }catch(e){} }
+}, 1000);
+// the open quest window follows the clock without being rebuilt (so nothing you're typing is lost)
+function updateQuestBarsInPlace(){
+  const els = document.querySelectorAll('#quests-body [data-qk]');
+  if(!els.length) return;
+  let ready = false;
+  els.forEach(el=>{
+    const [lineId, qi, ti] = el.dataset.qk.split('|');
+    const line = QUEST_LINES[lineId]; if(!line) return;
+    const task = line.quests[+qi] && line.quests[+qi].tasks[+ti]; if(!task) return;
+    const p = Math.min(task.target, getTaskProgress(lineId, +qi, +ti));
+    const fill = el.querySelector('.quest-progress-bar-fill'), lab = el.querySelector('.quest-progress-label');
+    if(fill) fill.style.width = Math.round(p / task.target * 100) + '%';
+    if(lab) lab.textContent = questProgressText(task, p);
+    if(isQuestReady(lineId, +qi, line.quests[+qi]) && questLineLive(line)) ready = true;
+  });
+  const btn = document.querySelector('#quests-body .quest-complete-btn');
+  if(btn && btn.disabled && ready) renderQuestsUI();
+}
+// auras / potions / coins, the same way a promo code hands them out
+function grantPromoRewards(rewards){
+  (rewards || []).forEach(r=>{
+    if(r.rt === 'aura' && ITEMS[r.ri]){
+      ensureItem(r.ri);
+      inventory[r.ri].count += r.rq;
+      inventory[r.ri].times += r.rq;
+      recordPulls(r.ri, r.rq);
+    } else if(r.rt === 'potion' && POTIONS[r.ri]){
+      POTIONS[r.ri].count = (POTIONS[r.ri].count || 0) + r.rq;
+    } else if(r.rt === 'coins'){
+      coins += r.rq;
+      updateCoinDisplay(true);
+    }
+  });
+}
+function promoRewardText(rewards){
+  return (rewards || []).map(r=>{
+    if(r.rt === 'coins') return `${Number(r.rq).toLocaleString('ru-RU')} монет`;
+    const meta = r.rt === 'aura' ? ITEMS[r.ri] : POTIONS[r.ri];
+    return `${(meta && meta.name) || r.ri} x${r.rq}`;
+  }).join(', ');
+}
+// a promo code's quest: one quest in a line of its own, optionally with a deadline
+function addCustomQuestFromPromo(payload){
+  const q = payload.quest;
+  if(!q || !Array.isArray(q.tasks) || !q.tasks.length) return null;
+  const lineId = 'cq_' + payload.id;
+  const rewards = Array.isArray(q.rewards) ? q.rewards : [];
+  const name = String(q.name || 'Особый квест').slice(0, 60);
+  customQuests[lineId] = {
+    custom: true,
+    name,
+    description: String(q.desc || 'Квест из промокода').slice(0, 200),
+    expiresAt: q.limitMin > 0 ? Date.now() + q.limitMin * 60000 : 0,
+    quests: [{
+      title: name,
+      tasks: q.tasks.map(t => Object.assign({}, t, { target: Math.max(1, Math.floor(Number(t.target) || 1)), label: customTaskLabel(t) })),
+      rewards,
+      rewardText: promoRewardText(rewards) || 'без награды'
+    }]
+  };
+  questState[lineId] = { questIndex: 0, progress: {} };
+  syncCustomQuestLines();
+  return customQuests[lineId];
+}
+// the countdowns in the open quest window tick every second; a quest that runs out redraws it
+setInterval(()=>{
+  const els = document.querySelectorAll('#quests-modal [data-cq-exp]');
+  if(!els.length) return;
+  let ran = false;
+  els.forEach(el=>{
+    const left = Number(el.dataset.cqExp) - Date.now();
+    if(left <= 0) ran = true; else el.textContent = fmtQuestLeft(left);
+  });
+  if(ran) try{ renderQuestsUI(); }catch(e){}
+}, 1000);
+
 // ---- Clean crafting state API (single source of truth — no DOM-cached have/need values) ----
 // craftState[craftId] = { autocraft: bool, qty: number, have: { [ingredientIndex]: number } }
 function craftGetState(craftId){
@@ -17308,6 +22437,7 @@ function craftExecute(entry){
 
   renderInventory();
   briefResultMessage(`${styledRarityName(entry.id, entry.name)} создан x${qty}`);
+  questTouched(questEvent('craft', null, qty));
   saveState();
   return true;
 }
@@ -17318,7 +22448,11 @@ const MAX_SAVE_SLOTS = 1;
 let bankCoins = 0;
 let bankLevel = 0; // Bank upgrade level: 0 = starting (free), 1 = original behavior (300🪙),
 // 2 = doubled amount (2000🪙), 3 = doubles collection SPEED instead of amount (10000🪙)
-const BANK_MAX_BY_LEVEL = [5000, 10000, 20000, 30000];
+// 4 = x1.8 to all auto-collected coins on top of level 3 (50000🪙)
+// 5 = collection speed another x2.25 (300000🪙)
+const BANK_MAX_BY_LEVEL = [5000, 10000, 20000, 30000, 45000, 100000];
+const BANK_UPGRADE_COSTS = [300, 2000, 10000, 50000, 300000]; // cost to go from level N to N+1
+const BANK_MAX_LEVEL = BANK_UPGRADE_COSTS.length;
 function getBankMax(){
   const lvl = Math.max(0, Math.min(bankLevel, BANK_MAX_BY_LEVEL.length - 1));
   return BANK_MAX_BY_LEVEL[lvl];
@@ -17330,7 +22464,13 @@ function getBankIncomeBase(){
   return 2 * Math.pow(2, Math.min(bankLevel, 2) - 1);
 }
 function getBankSpeedMultiplier(){
-  return bankLevel >= 3 ? 2 : 1;
+  // level 5 speeds collection up another x2.25 on top of level 3
+  // (16/7 rather than 2.25: Ур.4 rounds 4*1.8 down to 7 coins, so this brings it back to
+  // exactly what a x2.25 amount (16 coins) would give per minute)
+  return (bankLevel >= 3 ? 2 : 1) * (bankLevel >= 5 ? 16 / 7 : 1);
+}
+function getBankTotalMultiplier(){
+  return bankLevel >= 4 ? 1.8 : 1;
 }
 if(typeof window.autoCollectorActive === 'undefined') window.autoCollectorActive = false;
 
@@ -17356,6 +22496,7 @@ function loadStateFromSlot(slot){
     if(typeof state.lightningGloveActive === 'boolean') window.lightningGloveActive = state.lightningGloveActive;
     if(typeof state.rainbowGloveActive === 'boolean') window.rainbowGloveActive = state.rainbowGloveActive;
     if(typeof state.cloverGloveActive === 'boolean') window.cloverGloveActive = state.cloverGloveActive;
+    if(typeof state.crystalGloveActive === 'boolean') window.crystalGloveActive = state.crystalGloveActive;
     if(typeof state.ghostGloveActive === 'boolean') window.ghostGloveActive = state.ghostGloveActive;
     if(typeof state.luckyGloveActive === 'boolean') window.luckyGloveActive = state.luckyGloveActive;
     if(typeof state.autoCollectorActive === 'boolean') window.autoCollectorActive = state.autoCollectorActive;
@@ -17412,6 +22553,14 @@ function loadStateFromSlot(slot){
       normalizeInventoryPulls();
     }
 
+    // custom promo buffs first, so their counts / timers / charges below have something to attach to
+    if(state.promoCustomDefs && typeof state.promoCustomDefs === 'object'){
+      Object.keys(state.promoCustomDefs).forEach(k=>{ try{ definePromoCustomPotion(k, state.promoCustomDefs[k]); }catch(e){} });
+    }
+    if(typeof state.promoBonusSpinMultiplier === 'number' && state.promoBonusSpinMultiplier > 0) window._promoBonusSpinMultiplier = state.promoBonusSpinMultiplier;
+    customQuests = (state.customQuests && typeof state.customQuests === 'object') ? state.customQuests : {};
+    syncCustomQuestLines();
+
     if(state.POTIONS && typeof state.POTIONS === 'object'){
       Object.keys(state.POTIONS).forEach(k=>{
         if(POTIONS[k]) POTIONS[k].count = Number(state.POTIONS[k].count || 0);
@@ -17447,6 +22596,17 @@ function loadStateFromSlot(slot){
           scheduleEffectRemoval(aid);
         }
       });
+    }
+    // buffs banked "for N spins" (custom promo buffs, Ледяное зелье, ...)
+    if(state.spinCharges && typeof state.spinCharges === 'object'){
+      Object.keys(state.spinCharges).forEach(aid=>{
+        const n = Math.floor(Number(state.spinCharges[aid]) || 0);
+        if(n > 0 && POTIONS[aid]){
+          spinChargeEffects[aid] = n;
+          try{ showSpinChargeIcon(aid); }catch(e){}
+        }
+      });
+      recomputePotionSpeedMultiplier();
     }
 
     // restore auto-spin unlocked / enabled state if present
@@ -17490,13 +22650,14 @@ function saveStateToSlot(slot){
       lightningGloveActive: !!window.lightningGloveActive,
       rainbowGloveActive: !!window.rainbowGloveActive,
       cloverGloveActive: !!window.cloverGloveActive,
+      crystalGloveActive: !!window.crystalGloveActive,
       ghostGloveActive: !!window.ghostGloveActive,
       luckyGloveActive: !!window.luckyGloveActive,
       autoCollectorActive: !!window.autoCollectorActive,
       bankCoins: bankCoins || 0,
       bankLevel: (typeof bankLevel === 'number') ? bankLevel : 0,
 
-      activeThemeId: activeThemeId || null,
+      activeThemeId: (activeThemeId && !DEMO_THEMES[activeThemeId]) ? activeThemeId : null,
       totalSpins: totalSpins || 0,
       totalPlaytimeMinutes: totalPlaytimeMinutes || 0,
       biomeChangerCooldownMs: window._biomeChangerCooldownMs || (15 * 60 * 1000),
@@ -17533,6 +22694,12 @@ function saveStateToSlot(slot){
         state.activeEffects[aid] = rem;
       }
     });
+
+    // what promo codes created: custom buffs, banked spin charges, custom quests
+    state.promoCustomDefs = promoCustomDefs;
+    state.spinCharges = Object.assign({}, spinChargeEffects);
+    if(typeof window._promoBonusSpinMultiplier === 'number' && window._promoBonusSpinMultiplier > 0) state.promoBonusSpinMultiplier = window._promoBonusSpinMultiplier;
+    state.customQuests = customQuests;
 
     // persist filter state and seen items (values that have appeared at least once)
     state.filterState = window._filterState || {};
@@ -17870,7 +23037,7 @@ craftListContainer.innerHTML = ''; // will populate dynamically below
 // granted, auto-add capping at the single-unit need, qty not scaling the put-limit).
 // ---- Кузница / Зельеварня: shared card pieces (icon, status) ----
 const GLOVE_TINT = { lucky_glove:'#2fa74a', pig_glove:'#ff8fb0', rich_glove:'#e8b830', friends_glove:'#4fb8e0', zombie_glove:'#5aa84a',
-  ghost_glove:'#c6d2e6', volcanic_glove:'#ff5a1f', lightning_glove:'#f0d030', rainbow_glove:'rainbow', clover_glove:'#1f8a3c' };
+  ghost_glove:'#c6d2e6', volcanic_glove:'#ff5a1f', lightning_glove:'#f0d030', rainbow_glove:'rainbow', clover_glove:'#1f8a3c', crystal_glove:'#7fe3ff' };
 // names and badges keep their own colours in the dark vault, lifted only where they'd sink
 function inkFixWithin(root, bg, target){
   if(!root) return;
@@ -18203,16 +23370,50 @@ function buildCraftIngredientsUI(entry){
 // Cached on window so auto-craft logic can look up recipes even before the crafting menu
 // has ever been opened this session (this is what broke auto-craft after a reload before:
 // the cache used to only get filled the first time the modal was opened).
-// Explicit display order for the forge (and the admin gear list): weakest first.
+// Explicit display order for the forge (and the admin gear list):
+//   tools first, then the gloves in the order a player reaches them (by the rarest aura
+//   each recipe needs), then the biome changer, then each potion line from the base
+//   potion up, then craftable values.
 const CRAFT_DISPLAY_ORDER = [
-  // equipment
-  'skipper', 'auto_collector', 'lucky_glove', 'pig_glove', 'rich_glove',
-  'friends_glove', 'zombie_glove', 'ghost_glove', 'volcanic_glove',
-  'lightning_glove', 'rainbow_glove', 'clover_glove', 'biome_changer',
-  // potions
-  'luckPotion', 'speedPotion', 'fortunePotion', 'fortunePotion2',
-  'windPotion', 'windPotion2', 'summerPotion'
+  // tools
+  'skipper', 'auto_collector',
+  // gloves by tier (see GLOVE_TIERS), right hand first inside each tier
+  'lucky_glove', 'pig_glove', 'rich_glove',
+  'friends_glove', 'zombie_glove',
+  'ghost_glove', 'volcanic_glove',
+  'lightning_glove', 'clover_glove',
+  'rainbow_glove', 'crystal_glove',
+  'biome_changer',
+  // potions: luck line, then speed line
+  'luckPotion', 'fortunePotion', 'fortunePotion2',
+  'speedPotion', 'windPotion', 'windPotion2', 'summerPotion',
+  // values
+  'mag_mage'
 ];
+// Glove tiers: each tier is a right-hand and a left-hand glove of about the same difficulty
+// (judged by the rarest aura in the recipe), so a player always knows the next pair to aim
+// for. There are more right gloves than left ones, so tier I offers two right gloves
+// (Свинки is the upgrade over Удачливая).
+const GLOVE_TIERS = {
+  lucky_glove:    { tier: 1, hand: 'right' },  // Изумрудный 1/444
+  pig_glove:      { tier: 1, hand: 'right' },  // Свин 1/1 300
+  rich_glove:     { tier: 1, hand: 'left' },   // Богатый : Джекпот 1/7 777
+  friends_glove:  { tier: 2, hand: 'right' },  // Глокус 1/10 000
+  zombie_glove:   { tier: 2, hand: 'left' },   // ЗОМБИ 1/12 222
+  ghost_glove:    { tier: 3, hand: 'right' },  // Призрачный 1/100 000
+  volcanic_glove: { tier: 3, hand: 'left' },   // Вулканический 1/666 666
+  lightning_glove:{ tier: 4, hand: 'right' },  // Громовержец 1/2 000 000
+  clover_glove:   { tier: 4, hand: 'left' },   // Клевер 1/7 777 777
+  rainbow_glove:  { tier: 5, hand: 'right' },  // Спектр 1/33 000 000
+  crystal_glove:  { tier: 5, hand: 'left' }    // Кристалл 1/62 000 000
+};
+const GLOVE_TIER_META = {
+  1: { roman: 'I', name: 'Начальный' },
+  2: { roman: 'II', name: 'Продвинутый' },
+  3: { roman: 'III', name: 'Опытный' },
+  4: { roman: 'IV', name: 'Мастер' },
+  5: { roman: 'V', name: 'Легенда' }
+};
 function buildCraftablesList(){
   if(!window._craftablesCache) window._craftablesCache = [];
   const craftables = window._craftablesCache;
@@ -18229,6 +23430,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
+      effectDesc: 'Без пролёта карточек — результат прокрутки сразу',
       recipe: [
         { name: 'Обычный', id: 'common', need: 10 },
         { name: 'Необычный', id: 'uncommon', need: 5 },
@@ -18252,7 +23454,7 @@ function buildCraftablesList(){
       type: 'craft',
       craftable: !!craftable,
       // effectDesc shown in craft UI: speed and luck summary
-      effectDesc: '+10% к скорости прокрутки · +100% к удаче',
+      effectDesc: '+100% к удаче · +10% к скорости прокрутки',
       recipe: [
         { name: 'Свин', id: 'pig', need: 1 },
         { name: 'ЗЛОЙ', id: 'evil', need: 3 },
@@ -18300,7 +23502,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+17% к скорости прокрутки · +190% к удаче',
+      effectDesc: '+190% к удаче · +17% к скорости прокрутки',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 40 },
         { name: 'Зелье Скорости', id: 'speedPotion', need: 40 },
@@ -18327,7 +23529,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+50% к удаче (без бонуса к скорости)',
+      effectDesc: '+30% к удаче · x2 монет за клик по монете · монеты появляются чаще (каждые 3–10 с вместо 5–20 с) · x2 дохода Автособирателя',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 7 },
         { name: 'Аквамарин', id: 'aquamarine', need: 20 },
@@ -18351,8 +23553,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      // updated effect description to match implemented value (+80% luck)
-      effectDesc: '+20% к скорости прокрутки · +80% к удаче; каждые 10 прокруток — следующий бросок x3',
+      effectDesc: '+80% к удаче · +20% к скорости прокрутки · раз в 10 прокруток — x3 удачи вместо x2',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 122 },
         { name: 'ЗОМБИ', id: 'zombie', need: 1 },
@@ -18380,7 +23581,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+23% к скорости прокрутки · +333% к удаче',
+      effectDesc: '+333% к удаче · +23% к скорости прокрутки',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 150 },
         { name: 'Зелье Скорости', id: 'speedPotion', need: 150 },
@@ -18414,7 +23615,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+66% к удаче · +23% к скорости прокрутки; каждая 10-я прокрутка — следующий бросок x6',
+      effectDesc: '+66% к удаче · +23% к скорости прокрутки · раз в 10 прокруток — x6 удачи вместо x2',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 333 },
         { name: 'Зелье Скорости', id: 'speedPotion', need: 333 },
@@ -18445,7 +23646,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+34% к скорости прокрутки, +555% к удаче',
+      effectDesc: '+555% к удаче · +34% к скорости прокрутки',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 500 },
         { name: 'Зелье Скорости', id: 'speedPotion', need: 500 },
@@ -18481,7 +23682,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+1111% удачи, +99% к скорости прокрутки',
+      effectDesc: '+1111% к удаче · +99% к скорости прокрутки',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 2000 },
         { name: 'Зелье Скорости', id: 'speedPotion', need: 2000 },
@@ -18509,7 +23710,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+200% к удаче; x10 удача каждые 10 прокруток',
+      effectDesc: '+200% к удаче · раз в 10 прокруток — x10 удачи вместо x2',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 1000 },
         { name: 'Клевер', id: 'clover', need: 1 },
@@ -18523,6 +23724,35 @@ function buildCraftablesList(){
   })();
 
 
+  // Кристаллическая Перчатка (Левая Рука) — tier V. Weighted by count × rarity it comes to
+  // ≈103.7M spins at x1 luck against ≈82.9M for Радужная (+25%), plus 2500 + 2500 potions.
+  (function(){
+    const ID = 'crystal_glove';
+    ensureItem(ID);
+    const craftable = !inventory[ID] || inventory[ID].count <= 0;
+    craftables.push({
+      id: ID,
+      name: 'Кристаллическая Перчатка (Левая Рука)',
+      category: 'equipment',
+      type: 'craft',
+      craftable: !!craftable,
+      effectDesc: '+350% к удаче · +40% к скорости прокрутки · раз в 10 прокруток — x12 удачи вместо x2',
+      recipe: [
+        { name: 'Зелье Удачи', id: 'luckPotion', need: 2500 },
+        { name: 'Зелье Скорости', id: 'speedPotion', need: 2500 },
+        { name: 'Кристалл', id: 'crystal', need: 1 },
+        { name: 'Бриллиантовый', id: 'diamond', need: 3 },
+        { name: 'Полярный', id: 'polar', need: 1 },
+        { name: 'Зеркальный', id: 'mirror', need: 12 },
+        { name: 'Ледяной', id: 'icy', need: 20 },
+        { name: 'Опаловый', id: 'opal', need: 20 },
+        { name: 'Сапфир : Активированный', id: 'sapphire_activated', need: 200 },
+        { name: 'Кристаллизованый', id: 'crystallized', need: 2500 }
+      ],
+      icon: null
+    });
+  })();
+
   // Автособиратель equipment craft entry
   (function(){
     const ID = 'auto_collector';
@@ -18534,7 +23764,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: 'Автоматически собирает монеты в банк',
+      effectDesc: 'Монеты сами уходят в банк — ловить их на экране не нужно',
       coinCost: 100,
       recipe: [
         { name: 'Богатый', id: 'wealthy', need: 1 },
@@ -18546,10 +23776,19 @@ function buildCraftablesList(){
     });
   })();
 
-  // Potions (go to potions section)
-  craftables.push({ id: 'luckPotion', name: POTIONS.luckPotion.name, category: 'potions', type:'buy', price:10, icon:null, effectDesc: POTIONS.luckPotion.desc || '+100% удачи' });
-  craftables.push({ id: 'speedPotion', name: POTIONS.speedPotion.name, category: 'potions', type:'buy', price:10, icon:null, effectDesc: POTIONS.speedPotion.desc || '+13% к скорости' });
-  craftables.push({ id: 'fortunePotion', name: POTIONS.fortunePotion.name, category: 'potions', type:'craft', effectDesc: POTIONS.fortunePotion.desc || '+200% удачи', recipe:[
+  // Potions (go to potions section). The forge line is built from the potion's real numbers,
+  // so it can never drift from what drinking it does.
+  const potDesc = (id)=>{
+    const P = POTIONS[id];
+    const parts = [];
+    if(P.bonus) parts.push('+' + P.bonus + '% к удаче');
+    if(P.speedBonus) parts.push('+' + P.speedBonus + '% к скорости прокрутки');
+    if(P.duration) parts.push(P.duration % 60000 === 0 ? (P.duration / 60000) + ' мин' : Math.round(P.duration / 1000) + ' с');
+    return parts.length ? parts.join(' · ') : (P.desc || '');
+  };
+  craftables.push({ id: 'luckPotion', name: POTIONS.luckPotion.name, category: 'potions', type:'buy', price:10, icon:null, effectDesc: potDesc('luckPotion') });
+  craftables.push({ id: 'speedPotion', name: POTIONS.speedPotion.name, category: 'potions', type:'buy', price:10, icon:null, effectDesc: potDesc('speedPotion') });
+  craftables.push({ id: 'fortunePotion', name: POTIONS.fortunePotion.name, category: 'potions', type:'craft', effectDesc: potDesc('fortunePotion'), recipe:[
     { name: 'Зелье Удачи', id:'luckPotion', need:10 }
   ], icon:null });
 
@@ -18560,7 +23799,7 @@ function buildCraftablesList(){
     category: 'potions',
     type: 'craft',
     craftable: true,
-    effectDesc: POTIONS.fortunePotion2.desc || '+300% удачи',
+    effectDesc: potDesc('fortunePotion2'),
     recipe: [
       { name: 'Зелье Удачи', id: 'luckPotion', need: 25 }
     ],
@@ -18574,7 +23813,7 @@ function buildCraftablesList(){
     category: 'potions',
     type: 'craft',
     craftable: true,
-    effectDesc: POTIONS.windPotion2.desc || '+50% к скорости (3 мин)',
+    effectDesc: potDesc('windPotion2'),
     recipe: [
       { name: 'Зелье Скорости', id: 'speedPotion', need: 25 }
     ],
@@ -18602,7 +23841,7 @@ function buildCraftablesList(){
   })();
 
 
-  craftables.push({ id: 'windPotion', name: POTIONS.windPotion.name, category: 'potions', type:'craft', effectDesc: POTIONS.windPotion.desc || '+27% к скорости', recipe:[
+  craftables.push({ id: 'windPotion', name: POTIONS.windPotion.name, category: 'potions', type:'craft', effectDesc: potDesc('windPotion'), recipe:[
     { name: 'Зелье Скорости', id:'speedPotion', need:10 }
   ], icon:null });
 
@@ -18834,12 +24073,33 @@ function openCraftGUI(){
     return ia - ib;
   });
 
-  // place cards into appropriate section by category (potions, equipment, values)
+  // place cards into appropriate section by category (potions, equipment, values);
+  // gloves get a tier heading before the first glove of each tier
+  let lastTier = 0;
   orderedCraftables.forEach(entry=>{
     const created = createCraftCard(entry);
     let targetList = valuesSection.querySelector('.craft-section-list');
     if(entry.category === 'potions') targetList = potionsSection.querySelector('.craft-section-list');
     else if(entry.category === 'equipment') targetList = equipmentSection.querySelector('.craft-section-list');
+    const gt = GLOVE_TIERS[entry.id];
+    if(gt && gt.tier !== lastTier){
+      lastTier = gt.tier;
+      const m = GLOVE_TIER_META[gt.tier];
+      const head = document.createElement('div');
+      head.className = 'ws-tier-head';
+      head.innerHTML = `<b>Тир ${m.roman}</b><span>${m.name}</span>${m.note ? `<small>${m.note}</small>` : '<small>правая + левая рука</small>'}`;
+      targetList.appendChild(head);
+    } else if(!gt && lastTier && entry.category === 'equipment'){
+      lastTier = 0;
+      const head = document.createElement('div');
+      head.className = 'ws-tier-head ws-tier-head-plain';
+      head.innerHTML = '<b>Прочее</b>';
+      targetList.appendChild(head);
+    }
+    if(gt){
+      const chips = created.card.querySelector('.ws-chips');
+      if(chips) chips.insertAdjacentHTML('afterbegin', `<span class="ws-chip ws-chip-tier">Тир ${GLOVE_TIER_META[gt.tier].roman} · ${gt.hand === 'right' ? 'правая' : 'левая'}</span>`);
+    }
     targetList.appendChild(created.card);
   });
 
@@ -18849,11 +24109,12 @@ function openCraftGUI(){
   const tabs = document.createElement('div');
   tabs.className = 'ws-tabs';
   tabs.setAttribute('role', 'tablist');
-  const secs = [equipmentSection, potionsSection, valuesSection].filter(sec=> sec.querySelector('.craft-section-list').children.length);
+  const cardCount = (sec)=> sec.querySelectorAll('.craft-section-list > .craft-card').length;
+  const secs = [equipmentSection, potionsSection, valuesSection].filter(sec=> cardCount(sec));
   if(!window._forgeTab || !secs.some(sec=> sec.id === window._forgeTab)) window._forgeTab = secs.length ? secs[0].id : '';
   [equipmentSection, potionsSection, valuesSection].forEach(sec=>{ if(!secs.includes(sec)) sec.remove(); });
   secs.forEach(sec=>{
-    const n = sec.querySelector('.craft-section-list').children.length;
+    const n = cardCount(sec);
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'ws-tab'; b.setAttribute('role', 'tab');
     b.innerHTML = `${sec._title}<span>${n}</span>`;
@@ -18965,7 +24226,7 @@ function tryAutoAddFromDrop(item){
      // If auto-collector is active, collect directly to bank without showing emoji
      if(window.autoCollectorActive){
        const baseAmount = getBankIncomeBase(); // 1 coin/tick at Ур.0, 2 at Ур.1, 4 at Ур.2
-       const amount = window.richGloveActive ? baseAmount * 2 : baseAmount;
+       const amount = Math.round((window.richGloveActive ? baseAmount * 2 : baseAmount) * getBankTotalMultiplier());
        const bankMax = getBankMax();
        if(bankCoins < bankMax){
          const toAdd = Math.min(amount, bankMax - bankCoins);
@@ -19001,6 +24262,7 @@ function tryAutoAddFromDrop(item){
        coins += amount;
        briefResultMessage(`+${amount} 🪙`);
        updateCoinDisplay(true);
+       questTouched(questEvent('coinPick'));
 
        // small pop animation then remove
        el.style.transform = 'scale(1.25)';
@@ -19101,11 +24363,10 @@ function tryAutoAddFromDrop(item){
    
    // Update upgrade button state
    const upgradeBtn = document.getElementById('bank-upgrade-btn');
-   const BANK_UPGRADE_COSTS = [300, 2000, 10000]; // cost to go from level N to N+1
    const upgradeCostForNextLevel = BANK_UPGRADE_COSTS[bankLevel] || 0;
    if(upgradeBtn){
-     if(bankLevel >= 3){
-       upgradeBtn.textContent = 'Ур.3 (Макс. уровень)';
+     if(bankLevel >= BANK_MAX_LEVEL){
+       upgradeBtn.textContent = 'Ур.' + BANK_MAX_LEVEL + ' (Макс. уровень)';
        upgradeBtn.disabled = true;
        upgradeBtn.style.background = '#999';
      } else {
@@ -19149,6 +24410,7 @@ function tryAutoAddFromDrop(item){
        coins += bankCoins;
        updateCoinDisplay(true);
        briefResultMessage(`+${bankCoins} 🪙 выведено из банки`);
+       questTouched(questEvent('bankWithdraw', null, bankCoins));
        bankCoins = 0;
        updateBankDisplay();
      }
@@ -19159,10 +24421,9 @@ function tryAutoAddFromDrop(item){
  const bankUpgradeBtn = document.getElementById('bank-upgrade-btn');
  if(bankUpgradeBtn){
    bankUpgradeBtn.addEventListener('click', ()=>{
-     if(bankLevel >= 3){
+     if(bankLevel >= BANK_MAX_LEVEL){
        return; // Max level reached
      }
-     const BANK_UPGRADE_COSTS = [300, 2000, 10000];
      const upgradeCost = BANK_UPGRADE_COSTS[bankLevel] || 0;
      if(coins < upgradeCost){
        window.alert(`Недостаточно монет. Нужно ${upgradeCost} 🪙.`);
@@ -19178,6 +24439,10 @@ function tryAutoAddFromDrop(item){
        briefResultMessage('Банк прокачан до Ур.1! Доход и вместимость восстановлены до нормы.', 2400);
      } else if(bankLevel === 2){
        briefResultMessage('Банк прокачан до Ур.2! Доход от Автособирателя удвоен, вместимость тоже.', 2400);
+     } else if(bankLevel === 5){
+       briefResultMessage('Банк прокачан до Ур.5! Скорость получения монет ещё x2.25, вместимость 100 000.', 2400);
+     } else if(bankLevel === 4){
+       briefResultMessage('Банк прокачан до Ур.4! Всё получение монет Автособирателем x1.8, вместимость увеличена.', 2400);
      } else {
        briefResultMessage('Банк прокачан до Ур.3! Скорость получения монет удвоена, вместимость увеличена.', 2400);
      }
@@ -19256,7 +24521,7 @@ function tryAutoAddFromDrop(item){
            { type:'rarityClass', rarityClass:'good', target:1, label:'Выбей 1 ауру класса "Хороший"' },
            { type:'rarityClass', rarityClass:'normal', target:7, label:'Выбей 7 аур класса "Нормальный"' },
            { type:'rarityClass', rarityClass:'decent', target:15, label:'Выбей 15 аур класса "Неплохой"' },
-           { type:'rarityClass', rarityClass:'weak', target:25, label:'Выбей 25 аур класса "Плохой"' },
+           { type:'rarityClass', rarityClass:'weak', target:25, label:'Выбей 25 аур класса "Слабый"' },
            { type:'rarityClass', rarityClass:'common', target:500, label:'Выбей 500 аур класса "Обычный"' }
          ],
          rewardText: 'Ключ от зельеварни, Зелье Фортуны II x300, Зелье Ветра II x300, Зелье Удачи x1000, Зелье Скорости x1000',
@@ -19400,6 +24665,10 @@ function tryAutoAddFromDrop(item){
    }
  };
 
+ // custom quests from promo codes join the lines now that QUEST_LINES exists
+ window._questLinesReady = true;
+ syncCustomQuestLines();
+
  function getQuestState(lineId){
    if(!questState[lineId]) questState[lineId] = { questIndex: 0, progress: {} };
    return questState[lineId];
@@ -19426,20 +24695,14 @@ function tryAutoAddFromDrop(item){
  function trackQuestProgress(item){
    if(!item || !item.id) return;
    const rc = rarityClassKeyFor(item.id);
+   let denom = 0;
+   try{ denom = getNativeDenominatorForItem(ITEMS[item.id] || {}) || 0; }catch(e){}
    let changed = false;
-   Object.keys(QUEST_LINES).forEach(lineId=>{
-     const line = QUEST_LINES[lineId];
-     const st = getQuestState(lineId);
-     const quest = line.quests[st.questIndex];
-     if(!quest) return;
-     quest.tasks.forEach((task, taskIndex)=>{
-       if(task.type === 'rarityClass' && rc && rc === task.rarityClass){
-         if(bumpTaskProgress(lineId, st.questIndex, taskIndex, task.target)) changed = true;
-       } else if(task.type === 'specificAura' && item.id === task.auraId){
-         if(bumpTaskProgress(lineId, st.questIndex, taskIndex, task.target)) changed = true;
-       }
-     });
-   });
+   if(rc) changed = questEvent('rarityClass', t => t.rarityClass === rc) || changed;
+   changed = questEvent('specificAura', t => t.auraId === item.id) || changed;
+   changed = questEvent('spins') || changed;
+   if(autoSpinEnabled) changed = questEvent('autoSpins') || changed;
+   if(denom > 0) changed = questEvent('rarer', t => denom >= (t.minDenom || 0)) || changed;
    if(changed){
      renderQuestsUI();
      saveState();
@@ -19452,24 +24715,8 @@ function tryAutoAddFromDrop(item){
  // potion's id matches.
  function trackQuestPotionUse(qty, potionId){
    if(!qty || qty <= 0) return;
-   let changed = false;
-   Object.keys(QUEST_LINES).forEach(lineId=>{
-     const line = QUEST_LINES[lineId];
-     const st = getQuestState(lineId);
-     const quest = line.quests[st.questIndex];
-     if(!quest) return;
-     quest.tasks.forEach((task, taskIndex)=>{
-       if(task.type === 'potionUse'){
-         for(let i=0;i<qty;i++){
-           if(bumpTaskProgress(lineId, st.questIndex, taskIndex, task.target)) changed = true;
-         }
-       } else if(task.type === 'specificPotionUse' && potionId && task.potionId === potionId){
-         for(let i=0;i<qty;i++){
-           if(bumpTaskProgress(lineId, st.questIndex, taskIndex, task.target)) changed = true;
-         }
-       }
-     });
-   });
+   let changed = questEvent('potionUse', null, qty);
+   if(potionId) changed = questEvent('specificPotionUse', t => t.potionId === potionId, qty) || changed;
    if(changed){
      renderQuestsUI();
      saveState();
@@ -19480,18 +24727,7 @@ function tryAutoAddFromDrop(item){
  // "biomeChangerWeather" task whose target weather matches what was just rolled.
  function trackBiomeChangerWeather(weatherName){
    if(!weatherName) return;
-   let changed = false;
-   Object.keys(QUEST_LINES).forEach(lineId=>{
-     const line = QUEST_LINES[lineId];
-     const st = getQuestState(lineId);
-     const quest = line.quests[st.questIndex];
-     if(!quest) return;
-     quest.tasks.forEach((task, taskIndex)=>{
-       if(task.type === 'biomeChangerWeather' && task.weatherName === weatherName){
-         if(bumpTaskProgress(lineId, st.questIndex, taskIndex, task.target)) changed = true;
-       }
-     });
-   });
+   const changed = questEvent('biomeChangerWeather', t => t.weatherName === weatherName);
    if(changed){
      renderQuestsUI();
      saveState();
@@ -19506,7 +24742,7 @@ function tryAutoAddFromDrop(item){
      const line = QUEST_LINES[lineId];
      const st = getQuestState(lineId);
      const quest = line.quests[st.questIndex];
-     if(!quest) return;
+     if(!quest || !questLineLive(line)) return;
      quest.tasks.forEach((task, taskIndex)=>{
        if(task.type !== 'playtime') return;
        if(!st.progress[st.questIndex]) st.progress[st.questIndex] = {};
@@ -19531,6 +24767,39 @@ function tryAutoAddFromDrop(item){
  const questsHeaderTitle = document.getElementById('quests-header-title');
  let questsView = { screen: 'list', lineId: null };
 
+ // quest codes (QUEST-…) are entered right here, above the quest list, so a re-render of the
+ // list never eats what you're typing
+ (function(){
+   if(!questsBody || !questsBody.parentNode) return;
+   const row = document.createElement('div');
+   row.className = 'quest-code-row';
+   row.innerHTML = '<div class="quest-code-line"><input type="text" class="quest-code-input" placeholder="Квестовый код (QUEST-…)" autocomplete="off" spellcheck="false" aria-label="Квестовый код"><button type="button" class="action-btn accent-btn quest-code-btn">Ввести</button></div><div class="quest-code-msg" aria-live="polite"></div>';
+   questsBody.parentNode.insertBefore(row, questsBody);
+   const inp = row.querySelector('.quest-code-input'), msg = row.querySelector('.quest-code-msg');
+   const say = (t, ok)=>{ msg.textContent = t; msg.classList.toggle('ok', !!ok); };
+   function submit(){
+     const raw = (inp.value || '').trim();
+     if(!raw){ say('Вставь квестовый код'); return; }
+     let payload = null;
+     if(raw.toUpperCase().startsWith('QUEST-')) payload = decodePromoCode(raw, 'QUEST-');
+     else if(raw.toUpperCase().startsWith('PROMO-')){
+       payload = decodePromoCode(raw);
+       if(payload && !payload.quest){ say('Это обычный промокод — его вводят в окне «Промокод»'); return; }
+     }
+     if(!payload || !payload.quest){ say('Код неверный или повреждён'); return; }
+     if(isWordleCodeUsed(payload.id)){ say('Этот код уже использован'); return; }
+     markWordleCodeUsed(payload.id);
+     redeemPromoCode(payload);
+     inp.value = '';
+     say(`Новый квест: «${(payload.quest.name || 'Особый квест').slice(0, 60)}»`, true);
+     questsView = { screen: 'detail', lineId: 'cq_' + payload.id };
+     renderQuestsUI();
+   }
+   row.querySelector('.quest-code-btn').addEventListener('click', submit);
+   inp.addEventListener('keydown', e=>{ if(e.key === 'Enter'){ e.preventDefault(); submit(); } });
+   inp.addEventListener('input', ()=> say(''));
+ })();
+
  function openQuestsModal(){
    questsView = { screen: 'list', lineId: null };
    if(questsModal) questsModal.setAttribute('aria-hidden', 'false');
@@ -19549,17 +24818,19 @@ function tryAutoAddFromDrop(item){
 
    if(questsView.screen === 'list'){
      if(questsHeaderTitle) questsHeaderTitle.textContent = 'Квесты';
-     Object.keys(QUEST_LINES).forEach(lineId=>{
+     // quests from promo codes go first
+     const ids = Object.keys(QUEST_LINES);
+     ids.filter(k => QUEST_LINES[k].custom).concat(ids.filter(k => !QUEST_LINES[k].custom)).forEach(lineId=>{
        if(lineId === 'event') return; // летний ивент завершён — не показываем в списке
        const line = QUEST_LINES[lineId];
        const st = getQuestState(lineId);
        const card = document.createElement('div');
-       card.className = 'quest-line-card';
+       card.className = 'quest-line-card' + (line.custom ? ' quest-line-custom' : '');
        const doneCount = Math.min(st.questIndex, line.quests.length);
        card.innerHTML = `
-         <div class="quest-line-name">${line.name}</div>
-         <div class="quest-line-desc">${line.description}</div>
-         <div class="quest-line-progress">Пройдено квестов: ${doneCount}${line.quests.length ? ' / ' + line.quests.length : ''}</div>
+         <div class="quest-line-name">${escapeQuestText(line.name)}</div>
+         <div class="quest-line-desc">${escapeQuestText(line.description)}</div>
+         ${line.custom ? customQuestStatusHtml(line, st) : `<div class="quest-line-progress">Пройдено квестов: ${doneCount}${line.quests.length ? ' / ' + line.quests.length : ''}</div>`}
        `;
        card.addEventListener('click', ()=>{
          questsView = { screen: 'detail', lineId };
@@ -19572,6 +24843,7 @@ function tryAutoAddFromDrop(item){
      const line = QUEST_LINES[lineId];
      const st = getQuestState(lineId);
      if(questsHeaderTitle) questsHeaderTitle.textContent = line.name;
+     const live = questLineLive(line);
 
      const backBtn = document.createElement('button');
      backBtn.className = 'action-btn muted-btn quest-back-btn';
@@ -19583,24 +24855,38 @@ function tryAutoAddFromDrop(item){
      questsBody.appendChild(backBtn);
 
      const quest = line.quests[st.questIndex];
+     // a finished or expired custom quest can be cleared out of the list
+     const removeBtn = ()=>{
+       const b = document.createElement('button');
+       b.className = 'action-btn muted-btn quest-remove-btn';
+       b.textContent = 'Убрать квест';
+       b.addEventListener('click', ()=>{
+         delete customQuests[lineId]; delete questState[lineId]; syncCustomQuestLines();
+         saveState();
+         questsView = { screen: 'list', lineId: null };
+         renderQuestsUI();
+       });
+       return b;
+     };
      if(!quest){
        const placeholder = document.createElement('div');
        placeholder.className = 'quest-placeholder';
-       placeholder.textContent = 'Не Завершено';
+       placeholder.textContent = line.custom ? 'Квест выполнен ✓' : 'Не Завершено';
        questsBody.appendChild(placeholder);
+       if(line.custom) questsBody.appendChild(removeBtn());
        return;
      }
 
-     const ready = isQuestReady(lineId, st.questIndex, quest);
+     const ready = live && isQuestReady(lineId, st.questIndex, quest);
 
      const tasksHtml = quest.tasks.map((task, taskIndex)=>{
        const progress = Math.min(task.target, getTaskProgress(lineId, st.questIndex, taskIndex));
        const pct = Math.round((progress / task.target) * 100);
        return `
-         <div class="quest-task">
-           <div class="quest-task-label">${task.label}</div>
+         <div class="quest-task" data-qk="${lineId}|${st.questIndex}|${taskIndex}">
+           <div class="quest-task-label">${line.custom ? escapeQuestText(task.label) : task.label}</div>
            <div class="quest-progress-bar-wrap"><div class="quest-progress-bar-fill" style="width:${pct}%"></div></div>
-           <div class="quest-progress-label">${progress} / ${task.target}</div>
+           <div class="quest-progress-label">${questProgressText(task, progress)}</div>
          </div>
        `;
      }).join('');
@@ -19608,15 +24894,17 @@ function tryAutoAddFromDrop(item){
      const card = document.createElement('div');
      card.className = 'quest-detail-card';
      card.innerHTML = `
-       <div class="quest-detail-title">${quest.title}</div>
+       <div class="quest-detail-title">${line.custom ? escapeQuestText(quest.title) : quest.title}</div>
+       ${line.custom ? customQuestStatusHtml(line, st) : ''}
        ${tasksHtml}
        <div class="quest-reward-row">
-         <button class="action-btn accent-btn quest-complete-btn"${ready ? '' : ' disabled'}>Завершить</button>
-         <div class="quest-reward-text">Награда: ${quest.rewardText}</div>
+         <button class="action-btn accent-btn quest-complete-btn"${ready ? '' : ' disabled'}>${live ? 'Завершить' : 'Время вышло'}</button>
+         <div class="quest-reward-text">Награда: ${line.custom ? escapeQuestText(quest.rewardText) : quest.rewardText}</div>
        </div>
      `;
      questsBody.appendChild(card);
      card.querySelector('.quest-complete-btn').addEventListener('click', ()=> completeQuest(lineId));
+     if(line.custom && !live) questsBody.appendChild(removeBtn());
    }
  }
 
@@ -19631,8 +24919,15 @@ function tryAutoAddFromDrop(item){
      briefResultMessage('Летний ивент завершён — эти квесты больше нельзя пройти', 2600);
      return;
    }
+   if(!questLineLive(line)){
+     briefResultMessage('Время на этот квест вышло', 2400);
+     renderQuestsUI();
+     return;
+   }
    if(!isQuestReady(lineId, st.questIndex, quest)) return;
 
+   // custom quests carry promo-style rewards (auras / potions / coins)
+   if(Array.isArray(quest.rewards)) grantPromoRewards(quest.rewards);
    Object.keys(quest.reward || {}).forEach(potionId=>{
      if(POTIONS[potionId]){
        POTIONS[potionId].count = (POTIONS[potionId].count || 0) + quest.reward[potionId];
@@ -19659,9 +24954,11 @@ function tryAutoAddFromDrop(item){
      }
    }
    renderInventory();
-   briefResultMessage(`Квест выполнен! Награда: ${quest.rewardText}`, 2600);
+   updateTopStats();
+   briefResultMessage(`Квест выполнен! Награда: ${line.custom ? escapeQuestText(quest.rewardText) : quest.rewardText}`, 2600);
 
    st.questIndex += 1;
+   questEvent('questsDone');
    saveState();
    renderQuestsUI();
  }
@@ -19921,17 +25218,18 @@ function tryAutoAddFromDrop(item){
  // General "Промокод" codes — a different prefix from Слова codes, same underlying
  // obfuscation/signature machinery. Can carry rewards, a weather change, and/or a buff
  // (existing potion or a fully custom one), any combination of which may be present.
- function generatePromoCode(payload){
+ // codes that carry a quest get their own prefix, QUEST-, and are entered in the quest menu
+ function generatePromoCode(payload, prefix){
    const json = JSON.stringify(payload);
    const payloadB64 = btoa(unescape(encodeURIComponent(json)));
    const sig = wordleHash(payloadB64 + WORDLE_SECRET_SALT);
    const combined = sig + '.' + payloadB64;
-   return 'PROMO-' + wordleObfuscate(combined);
+   return (prefix || 'PROMO-') + wordleObfuscate(combined);
  }
- function decodePromoCode(rawCode){
+ function decodePromoCode(rawCode, prefixArg){
    try{
      const trimmed = (rawCode || '').trim();
-     const prefix = 'PROMO-';
+     const prefix = prefixArg || 'PROMO-';
      if(trimmed.slice(0, prefix.length).toUpperCase() !== prefix) return null;
      const raw = trimmed.slice(prefix.length);
      const combined = wordleDeobfuscate(raw);
@@ -19952,19 +25250,7 @@ function tryAutoAddFromDrop(item){
 
  // Applies everything a promo code carries: rewards, weather change, and/or a buff.
  function redeemPromoCode(payload){
-   (payload.rewards || []).forEach(r=>{
-     if(r.rt === 'aura' && ITEMS[r.ri]){
-       ensureItem(r.ri);
-       inventory[r.ri].count += r.rq;
-       inventory[r.ri].times += r.rq;
-       recordPulls(r.ri, r.rq);
-     } else if(r.rt === 'potion' && POTIONS[r.ri]){
-       POTIONS[r.ri].count = (POTIONS[r.ri].count || 0) + r.rq;
-     } else if(r.rt === 'coins'){
-       coins += r.rq;
-       updateCoinDisplay(true);
-     }
-   });
+   grantPromoRewards(payload.rewards);
 
    if(payload.weather && payload.weather.name){
      const ms = (typeof payload.weather.durationMin === 'number' && payload.weather.durationMin > 0)
@@ -19981,10 +25267,13 @@ function tryAutoAddFromDrop(item){
      try{ applyPromoBuff(buff); }catch(e){}
    });
 
+   let quest = null;
+   try{ quest = addCustomQuestFromPromo(payload); }catch(e){ console.warn(e); }
+
    renderInventory();
    updateTopStats();
    saveState();
-   briefResultMessage('Промокод активирован!', 2400);
+   briefResultMessage(quest ? `Промокод активирован! Новый квест: «${escapeQuestText(quest.name)}» — смотри в «Квестах»` : 'Промокод активирован!', quest ? 3400 : 2400);
  }
 
  // Applies a buff carried by a promo code — either referencing an EXISTING potion's
@@ -20008,24 +25297,8 @@ function tryAutoAddFromDrop(item){
      buffId = 'promoCustom_' + slug + '_' + n;
      n++;
    }
-   POTIONS[buffId] = {
-     id: buffId,
-     name: c.name || 'Кастомный бафф',
-     effectName: c.name || 'Кастомный бафф',
-     desc: c.desc || '',
-     color: c.color || '#ffb84d',
-     iconColor: c.color || '#ffb84d',
-     count: 0,
-     duration: c.spinCount ? 0 : (c.durationMs || 60000),
-     bonus: c.luckPercent || 0,
-     speedBonus: c.speedPercent || 0,
-     luckMultiplier: c.luckMultiplier || undefined,
-     speedMultiplier: c.speedMultiplier || undefined,
-     fixedLuck: c.fixedLuck || undefined,
-     fixedSpeed: c.fixedSpeed || undefined,
-     oneShot: !!c.spinCount,
-     _promoCustomOwner: true
-   };
+   // the definition is kept with the save, so the buff survives a reload
+   definePromoCustomPotion(buffId, c);
    if(c.bonusSpinModifier){
      window._promoBonusSpinMultiplier = c.bonusSpinModifier;
    }
@@ -20199,6 +25472,7 @@ function tryAutoAddFromDrop(item){
        wordleSession.finished = true;
        markWordleCodeUsed(wordleSession.id);
        grantWordleReward(wordleSession);
+       questTouched(questEvent('wordle'));
        setWordleMessage(`Разгадано! Награда: ${rewardLabel(wordleSession)}`);
        renderWordleGrid();
        renderWordleKeyboard();
@@ -20297,6 +25571,10 @@ function tryAutoAddFromDrop(item){
      const raw = (wordsCodeInput && wordsCodeInput.value) || '';
      const trimmed = raw.trim();
 
+     if(trimmed.toUpperCase().startsWith('QUEST-')){
+       if(wordsCodeError) wordsCodeError.textContent = 'Это квестовый код — введи его в меню «Квесты».';
+       return;
+     }
      if(trimmed.toUpperCase().startsWith('PROMO-')){
        const promoPayload = decodePromoCode(trimmed);
        if(!promoPayload){
