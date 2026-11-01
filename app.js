@@ -2423,7 +2423,7 @@ const GLOVE_BUFFS = {
     { id: 'buff-clover-glove-2', name: 'Четырёхлистный клевер', desc: 'Раз в 10 прокруток — x10 удачи вместо x2', color: '#1f7a3a' }
   ],
   crystal_glove: [
-    { id: 'buff-crystal-glove-1', name: 'Кристальная ясность', desc: '+350% к удаче · +40% к скорости прокрутки', color: '#7fe3ff' },
+    { id: 'buff-crystal-glove-1', name: 'Кристальная ясность', desc: '+470% к удаче · +60% к скорости прокрутки', color: '#7fe3ff' },
     { id: 'buff-crystal-glove-2', name: 'Резонанс', desc: 'Раз в 10 прокруток — x12 удачи вместо x2', color: '#7fe3ff' }
   ]
 };
@@ -2502,7 +2502,7 @@ const GLOVE_BUFF_DEFS = [
     { id:'buff_clover_glove_2', name:'Четырёхлистный клевер', desc:'Раз в 10 прокруток — x10 удачи вместо x2' }
   ]},
   { flag:'crystalGloveActive', color:'#7fe3ff', buffs:[
-    { id:'buff_crystal_glove_1', name:'Кристальная ясность', desc:'+350% к удаче · +40% к скорости прокрутки' },
+    { id:'buff_crystal_glove_1', name:'Кристальная ясность', desc:'+470% к удаче · +60% к скорости прокрутки' },
     { id:'buff_crystal_glove_2', name:'Резонанс', desc:'Раз в 10 прокруток — x12 удачи вместо x2' }
   ]}
 ];
@@ -2580,10 +2580,10 @@ function recomputeEquipmentEffects(){
   if(window.cloverGloveActive){
     luckAdd += 200;
   }
-  // Кристаллическая Перчатка (Левая Рука): +40% speed, +350% luck; its 10-spin -> x12 mechanic is in getBonusSpinMultiplier
+  // Кристаллическая Перчатка (Левая Рука): +60% speed, +470% luck; its 10-spin -> x12 mechanic is in getBonusSpinMultiplier
   if(window.crystalGloveActive){
-    speedMul *= 1.40;
-    luckAdd += 350;
+    speedMul *= 1.60;
+    luckAdd += 470;
   }
 
   equipmentSpeedMultiplier = speedMul;
@@ -23736,7 +23736,7 @@ function buildCraftablesList(){
       category: 'equipment',
       type: 'craft',
       craftable: !!craftable,
-      effectDesc: '+350% к удаче · +40% к скорости прокрутки · раз в 10 прокруток — x12 удачи вместо x2',
+      effectDesc: '+470% к удаче · +60% к скорости прокрутки · раз в 10 прокруток — x12 удачи вместо x2',
       recipe: [
         { name: 'Зелье Удачи', id: 'luckPotion', need: 2500 },
         { name: 'Зелье Скорости', id: 'speedPotion', need: 2500 },
